@@ -1,32 +1,32 @@
 'use strict';
 
-/* ── CONSTANTS ─────────────────────────────────────────────── */
 const GW = 380, GH_BASE = 520;
-const LANE_X = [22, 63, 104, 145, 186, 227, 275, 322,350];
+const LANE_X = [22, 63, 104, 145, 186, 227, 275, 322, 350];
 const NPC_IMGS = ['./images/traffic.png','./images/traffic2.png','./images/traffic3.png','./images/traffic4.png'];
 const CAR_W = 48, CAR_H = 70, NPC_W = 46, NPC_H = 68;
 const SAFE_GAP = 160, HITPAD = 10;
 const BASE_SPD = 5.5;
-const SPAWN_MS = 500;       // hard: faster spawning
+const SPAWN_MS = 500;
+const CAR_BASE_Y_OFFSET = 18;
+const CAR_BOOST_Y_LIFT = 18;
+const BRAKE_Y_LIFT = 10;
 
-/* ── SETTINGS (persisted) ──────────────────────────────────── */
 const DEFAULTS = {
   soundOn: true,
   vibrateOn: true,
   gyroOn: false,
   swipeOn: true,
-  boostOn: false,
-  hornOn: false,
+  boostOn: true,
+  hornOn: true,
   sensitivity: 5,
   nightMode: false
 };
 let S = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('hr_settings') || '{}'));
 function saveSett(){ localStorage.setItem('hr_settings', JSON.stringify(S)); }
 
-/* ── DOM ────────────────────────────────────────────────────── */
 const $ = id => document.getElementById(id);
 const gc = $('gc');
-const ctx = gc.getContext('2d', {alpha: false, desynchronized: true});
+const ctx = gc.getContext('2d', { alpha: false });
 const scoreEl = $('score-val'), levelEl = $('level-val');
 const speedBar = $('speed-bar'), speedLabel = $('speed-label');
 const screenHome = $('screen-home'), screenPause = $('screen-pause');
@@ -36,7 +36,6 @@ const bestEl = $('best-score'), newBestBadge = $('new-best-badge'), levelToast =
 const hornToast = $('horn-toast'), boostToast = $('boost-toast'), gyroHint = $('gyro-hint');
 const sndCrash = $('snd-crash'), sndDrive = $('snd-drive');
 
-/* ── CANVAS SIZE: fits between HUD and controls ─────────────── */
 const HUD_H = 50, CTRL_H = 90;
 function sizeCanvas(){
   const availH = window.innerHeight - HUD_H - CTRL_H;
@@ -46,40 +45,36 @@ function sizeCanvas(){
   gc.width = GW; gc.height = GH_BASE;
   gc.style.width  = cw + 'px';
   gc.style.height = ch + 'px';
-  // Vertically center in the available space
   gc.style.top = HUD_H + Math.max(0, (availH - ch) / 2) + 'px';
 }
 sizeCanvas();
 window.addEventListener('resize', sizeCanvas);
 
-/* ── IMAGES ──────────────────────────────────────────────────── */
 const roadImg = new Image(); roadImg.src = './images/road.png';
 const carImg  = new Image(); carImg.src  = './images/car.png';
 const npcImgs = NPC_IMGS.map(s => { const i = new Image(); i.src = s; return i; });
 
-/* ── STATE ────────────────────────────────────────────────────── */
 let STATE = 'home';
 let score = 0, level = 1, best = +localStorage.getItem('hr_best') || 0;
 let roadSpeed = BASE_SPD, roadY = 0;
-let carX = (GW - CAR_W) / 2, carVel = 0;
-let steerDir = 0;          // -1 / 0 / 1 — from buttons
-let gyroSteer = 0;         // continuous from gyro
+let carX = (GW - CAR_W) / 2;
+let carVelX = 0;
+let steerInput = 0;
+let gyroSteer = 0;
 let boostActive = false, boostTimer = 0;
+let brakeActive = false;
+let carYOffset = 0, carYOffsetTarget = 0;
 let traffic = [], particles = [], pops = [];
 let raf = null;
 let lastTime = 0, spawnTimer = 0, deathTimer = 0;
-
-/* extra hard: police cars and close-proximity trucks */
-let nearMissCount = 0, nearMissTimer = 0;
+let nearMissTimer = 0;
 
 bestEl.textContent = best;
 
-/* ── PHYSICS TUNING (sensitivity-aware) ─────────────────────── */
-function accel(){ return 0.5 + (S.sensitivity / 10) * 0.6; }
-const FRICTION = 0.82;
-const MAX_SPD  = 10;
+function steerAccel(){ return 0.55 + (S.sensitivity / 10) * 0.7; }
+const STEER_FRICTION = 0.78;
+const MAX_STEER_SPD  = 9;
 
-/* ── SCREEN MGMT ──────────────────────────────────────────────── */
 function showScreen(name){
   [screenHome, screenPause, screenGO, screenSettings].forEach(s => s.classList.remove('active'));
   if (name === 'home')     screenHome.classList.add('active');
@@ -94,7 +89,6 @@ function setHudVisible(v){
   $('speed-bar-wrap').style.opacity = o;
 }
 
-/* ── SETTINGS TOGGLE HELPER ──────────────────────────────────── */
 function applySettingsUI(){
   const map = {
     'set-sound':   [S.soundOn,   v => { S.soundOn   = v; if(!v) sndDrive.pause(); else if(STATE==='playing') sndDrive.play().catch(()=>{}); }],
@@ -114,7 +108,6 @@ function applySettingsUI(){
       const cur = map[id][0];
       const next = !cur;
       map[id][0] = next;
-      // update S key
       const key = id.replace('set-', '');
       const sKey = {sound:'soundOn', vibrate:'vibrateOn', gyro:'gyroOn', swipe:'swipeOn', boost:'boostOn', horn:'hornOn', night:'nightMode'}[key];
       if (sKey) S[sKey] = next;
@@ -136,15 +129,13 @@ $('set-sensitivity').addEventListener('input', e => {
   saveSett();
 });
 
-/* also mirror old sound-btn on home screen (removed — now in settings) */
-
-/* ── GAME FUNCTIONS ──────────────────────────────────────────── */
 function startGame(){
   traffic = []; particles = []; pops = [];
   score = 0; level = 1; roadSpeed = BASE_SPD;
-  carX = (GW - CAR_W) / 2; carVel = 0; steerDir = 0; gyroSteer = 0;
+  carX = (GW - CAR_W) / 2; carVelX = 0; steerInput = 0; gyroSteer = 0;
+  carYOffset = 0; carYOffsetTarget = 0;
   roadY = 0; lastTime = 0; spawnTimer = 0; deathTimer = 0;
-  boostActive = false; boostTimer = 0; nearMissCount = 0;
+  boostActive = false; boostTimer = 0; brakeActive = false; nearMissTimer = 0;
   scoreEl.textContent = '0'; levelEl.textContent = '1';
   speedBar.style.setProperty('--spd', '0%');
   speedLabel.textContent = '60';
@@ -193,7 +184,6 @@ function goHome(){
   showScreen('home');
 }
 
-/* ── EFFECTS ─────────────────────────────────────────────────── */
 function spawnExplosion(x, y){
   for (let i = 0; i < 26; i++){
     const a = Math.random() * Math.PI * 2;
@@ -212,20 +202,16 @@ function showToast(el, dur = 1000){
 
 function levelUp(){
   level++;
-  // hard: speed + traffic intensity
   roadSpeed += 0.55;
   levelEl.textContent = level;
   showToast(levelToast, 1000);
 }
 
-/* ── SPAWN ───────────────────────────────────────────────────── */
 function spawnNPC(){
-  // pick a random lane; hard = sometimes spawn in pairs
   const lane = Math.floor(Math.random() * LANE_X.length);
   if (traffic.some(t => t.lane === lane && t.y < SAFE_GAP)) return;
   const spd = roadSpeed - 0.6 + Math.random() * 1.95;
   traffic.push({ lane, x: LANE_X[lane] - NPC_W/2, y: -NPC_H, spd, imgIdx: Math.floor(Math.random() * npcImgs.length) });
-  // hard: 30% chance of double spawn adjacent lane at level ≥2
   if (level >= 2 && Math.random() < 0.20){
     const lane2 = (lane + 1 + Math.floor(Math.random() * 2)) % LANE_X.length;
     if (!traffic.some(t => t.lane === lane2 && t.y < SAFE_GAP)){
@@ -234,46 +220,55 @@ function spawnNPC(){
   }
 }
 
-/* ── COLLISION ────────────────────────────────────────────────── */
 function hbox(x, y, w, h){ return {l: x+HITPAD, r: x+w-HITPAD, t: y+HITPAD, b: y+h-HITPAD}; }
 function overlaps(a, b){ return !(a.b < b.t || a.t > b.b || a.r < b.l || a.l > b.r); }
 
-/* ── DRAW ─────────────────────────────────────────────────────── */
+function lerp(a, b, t){ return a + (b - a) * t; }
+
 function draw(){
   const rh = roadImg.naturalHeight || 600;
-  const off = roadY % rh;
-  for (let y = off - rh; y < GH_BASE; y += rh) ctx.drawImage(roadImg, 0, y, GW, rh);
-
-  // draw traffic UNDER car
-  traffic.forEach(t => ctx.drawImage(npcImgs[t.imgIdx], 0,0,120,120, t.x, t.y, NPC_W, NPC_H));
-
-  // boost glow
-  if (boostActive){
-    ctx.globalAlpha = 0.3 + Math.random() * 0.15;
-    ctx.fillStyle = '#ff8c00';
-    ctx.beginPath();
-    ctx.ellipse(carX + CAR_W/2, GH_BASE - 18, CAR_W/2 + 4, 18, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    
+  if (rh > 1){
+    const off = ((roadY % rh) + rh) % rh;
+    for (let y = off - rh; y < GH_BASE; y += rh){
+      ctx.drawImage(roadImg, 0, y, GW, rh);
+    }
+  } else {
+    ctx.fillStyle = '#1a1a1f';
+    ctx.fillRect(0, 0, GW, GH_BASE);
   }
 
-  // draw car ON TOP of traffic
-  ctx.drawImage(carImg, 0,0,120,120, carX, GH_BASE - CAR_H - 18, CAR_W, CAR_H);
+  traffic.forEach(t => ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, t.x, t.y, NPC_W, NPC_H));
 
-  // particles
+  const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
+
+  if (boostActive){
+    ctx.globalAlpha = 0.28 + Math.random() * 0.12;
+    ctx.fillStyle = '#ff8c00';
+    ctx.beginPath();
+    ctx.ellipse(carX + CAR_W/2, carDrawY + CAR_H + 4, CAR_W/2 + 4, 14, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    const trailLen = 3;
+    for (let i = 1; i <= trailLen; i++){
+      ctx.globalAlpha = (0.18 / i);
+      ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY + i * 6, CAR_W, CAR_H);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY, CAR_W, CAR_H);
+
   if (particles.length){
     particles.forEach(p => {
       ctx.globalAlpha = p.life;
       ctx.fillStyle = p.c;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, Math.max(0.1, p.r * p.life), 0, Math.PI*2);
+      ctx.arc(p.x, p.y, Math.max(0.1, p.r * p.life), 0, Math.PI * 2);
       ctx.fill();
     });
     ctx.globalAlpha = 1;
   }
 
-  // score pops
   if (pops.length){
     ctx.font = "bold 13px 'Orbitron',monospace";
     ctx.textAlign = 'center';
@@ -287,7 +282,6 @@ function draw(){
   }
 }
 
-/* ── HUD UPDATE ──────────────────────────────────────────────── */
 function updateHUD(){
   const pct = Math.min(100, (roadSpeed - BASE_SPD) / (BASE_SPD * 1.5) * 100);
   speedBar.style.setProperty('--spd', pct + '%');
@@ -295,31 +289,49 @@ function updateHUD(){
   if (S.soundOn) sndDrive.playbackRate = 0.9 + pct / 100 * 0.55;
 }
 
-/* ── MAIN LOOP ───────────────────────────────────────────────── */
 function loop(ts){
   if (STATE !== 'playing' && STATE !== 'dying') return;
-  const dt = lastTime ? Math.min((ts - lastTime) / 16.667, 3) : 1;
+  const rawDt = lastTime ? (ts - lastTime) / 16.667 : 1;
+  const dt = Math.min(rawDt, 2.5);
   lastTime = ts;
 
   if (STATE === 'playing'){
     roadY += roadSpeed * dt;
 
-    // effective steer: buttons take priority; gyro fills in if enabled
-    let eff = steerDir !== 0 ? steerDir : (S.gyroOn ? gyroSteer : 0);
+    let eff = steerInput !== 0 ? steerInput : (S.gyroOn ? gyroSteer : 0);
 
-    // boost
     if (boostActive){
       boostTimer -= dt * 16.667;
       if (boostTimer <= 0){ boostActive = false; }
     }
-    const boostMult = boostActive ? 1.8 : 1;
 
-    carVel += eff * accel() * boostMult * dt;
-    carVel *= Math.pow(FRICTION, dt);
-    carVel = Math.max(-MAX_SPD, Math.min(MAX_SPD, carVel));
-    carX = Math.max(0, Math.min(GW - CAR_W, carX + carVel * dt));
+    const boostMult = boostActive ? 1.9 : 1;
+    const brakeMult = brakeActive ? 0.0 : 1;
 
-    const chb = hbox(carX, GH_BASE - CAR_H - 18, CAR_W, CAR_H);
+    if (boostActive){
+      roadSpeed = Math.min(BASE_SPD * 2.6, roadSpeed + 0.18 * dt);
+    } else if (brakeActive){
+      roadSpeed = Math.max(BASE_SPD * 0.35, roadSpeed - 0.22 * dt);
+    } else {
+      roadSpeed = lerp(roadSpeed, BASE_SPD + (level - 1) * 0.55, 0.012 * dt);
+    }
+
+    if (boostActive){
+      carYOffsetTarget = CAR_BOOST_Y_LIFT;
+    } else if (brakeActive){
+      carYOffsetTarget = BRAKE_Y_LIFT;
+    } else {
+      carYOffsetTarget = 0;
+    }
+    carYOffset = lerp(carYOffset, carYOffsetTarget, 0.12 * dt);
+
+    carVelX += eff * steerAccel() * boostMult * brakeMult * dt;
+    carVelX *= Math.pow(STEER_FRICTION, dt);
+    carVelX = Math.max(-MAX_STEER_SPD, Math.min(MAX_STEER_SPD, carVelX));
+    carX = Math.max(0, Math.min(GW - CAR_W, carX + carVelX * dt));
+
+    const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
+    const chb = hbox(carX, carDrawY, CAR_W, CAR_H);
 
     for (let i = traffic.length - 1; i >= 0; i--){
       const t = traffic[i];
@@ -329,11 +341,11 @@ function loop(ts){
         score++;
         scoreEl.textContent = score;
         pops.push({x: t.x + NPC_W/2, y: GH_BASE - 50, a: 1, t: '+1', c: '#fff'});
-        if (score % 12 === 0) levelUp();   // hard: level up every 8 (was 10)
+        if (score % 12 === 0) levelUp();
         continue;
       }
       if (overlaps(chb, hbox(t.x, t.y, NPC_W, NPC_H))){
-        spawnExplosion(carX + CAR_W/2, GH_BASE - CAR_H/2 - 18);
+        spawnExplosion(carX + CAR_W/2, carDrawY + CAR_H/2);
         STATE = 'dying'; deathTimer = 520;
         sndDrive.pause();
         if (S.soundOn){ sndCrash.currentTime = 0; sndCrash.play().catch(() => {}); }
@@ -341,11 +353,9 @@ function loop(ts){
         setTimeout(() => gc.classList.remove('shake'), 400);
         break;
       }
-      // near miss detection (for scoring bonus)
       const nb = hbox(t.x, t.y, NPC_W, NPC_H);
       const exp = {l: nb.l-14, r: nb.r+14, t: nb.t, b: nb.b};
       if (overlaps(chb, exp) && !overlaps(chb, nb) && nearMissTimer <= 0){
-        nearMissCount++;
         nearMissTimer = 60;
         score++;
         scoreEl.textContent = score;
@@ -361,19 +371,16 @@ function loop(ts){
     updateHUD();
 
   } else {
-    // dying
     deathTimer -= dt * 16.667;
     if (deathTimer <= 0){ doGameOver(); return; }
   }
 
-  // particles
   for (let i = particles.length - 1; i >= 0; i--){
     const p = particles[i];
     p.x += p.vx * dt; p.y += p.vy * dt;
     p.vy += 0.15 * dt; p.life -= 0.035 * dt;
     if (p.life <= 0) particles.splice(i, 1);
   }
-  // score pops
   for (let i = pops.length - 1; i >= 0; i--){
     pops[i].y -= 1.5 * dt; pops[i].a -= 0.045 * dt;
     if (pops[i].a <= 0) pops.splice(i, 1);
@@ -383,7 +390,6 @@ function loop(ts){
   raf = requestAnimationFrame(loop);
 }
 
-/* ── BUTTON EVENTS ───────────────────────────────────────────── */
 $('play-btn').addEventListener('click', startGame);
 $('pause-btn').addEventListener('click', pauseGame);
 $('resume-btn').addEventListener('click', resumeGame);
@@ -391,7 +397,6 @@ $('retry-btn').addEventListener('click', startGame);
 $('home-from-pause').addEventListener('click', goHome);
 $('home-from-go').addEventListener('click', goHome);
 
-// Settings open/close
 function openSettings(prev){
   applySettingsUI();
   screenSettings.dataset.prev = prev || 'home';
@@ -405,63 +410,87 @@ $('settings-close-btn').addEventListener('click', () => {
   else goHome();
 });
 
-/* ── LEFT / RIGHT BUTTONS — instant response, no drift ──────── */
-// Use pointerdown/pointerup for reliable hold detection
-$('btn-left').addEventListener('pointerdown',  e => { e.preventDefault(); steerDir = -1; });
-$('btn-right').addEventListener('pointerdown', e => { e.preventDefault(); steerDir =  1; });
-// Release on the button itself (covers tap without leaving button)
-$('btn-left').addEventListener('pointerup',    e => { e.preventDefault(); steerDir = 0; carVel = 0; });
-$('btn-right').addEventListener('pointerup',   e => { e.preventDefault(); steerDir = 0; carVel = 0; });
-$('btn-left').addEventListener('pointerleave', e => { if (e.buttons > 0){ steerDir = 0; carVel = 0; }});
-$('btn-right').addEventListener('pointerleave',e => { if (e.buttons > 0){ steerDir = 0; carVel = 0; }});
-// Global cancel/up safety net
-document.addEventListener('pointerup',     () => { steerDir = 0; });
-document.addEventListener('pointercancel', () => { steerDir = 0; carVel = 0; });
+$('btn-left').addEventListener('pointerdown',  e => { e.preventDefault(); steerInput = -1; });
+$('btn-right').addEventListener('pointerdown', e => { e.preventDefault(); steerInput =  1; });
+$('btn-left').addEventListener('pointerup',    e => { e.preventDefault(); steerInput = 0; carVelX *= 0.3; });
+$('btn-right').addEventListener('pointerup',   e => { e.preventDefault(); steerInput = 0; carVelX *= 0.3; });
+$('btn-left').addEventListener('pointerleave', e => { if (e.buttons > 0){ steerInput = 0; carVelX *= 0.3; }});
+$('btn-right').addEventListener('pointerleave',e => { if (e.buttons > 0){ steerInput = 0; carVelX *= 0.3; }});
+document.addEventListener('pointerup',     () => { steerInput = 0; brakeActive = false; });
+document.addEventListener('pointercancel', () => { steerInput = 0; carVelX = 0; brakeActive = false; });
 
-/* ── BOOST BUTTON ────────────────────────────────────────────── */
 $('btn-boost').addEventListener('pointerdown', e => {
   e.preventDefault();
   if (STATE !== 'playing') return;
-  boostActive = true; boostTimer = 1200;
+  boostActive = true; boostTimer = 1400;
   showToast(boostToast, 400);
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate(40);
 });
+$('btn-boost').addEventListener('pointerup', e => { e.preventDefault(); });
 
-/* ── HORN BUTTON ─────────────────────────────────────────────── */
+const brakeBtn = $('btn-brake');
+if (brakeBtn){
+  brakeBtn.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    if (STATE !== 'playing') return;
+    brakeActive = true;
+  });
+  brakeBtn.addEventListener('pointerup',    e => { e.preventDefault(); brakeActive = false; });
+  brakeBtn.addEventListener('pointerleave', e => { if (e.buttons > 0) brakeActive = false; });
+}
+
 $('btn-horn').addEventListener('pointerdown', e => {
   e.preventDefault();
   if (STATE !== 'playing') return;
   showToast(hornToast, 400);
-  // slight scare: slow nearby NPC for 0.5s
-  traffic.forEach(t => {
-    if (Math.abs(t.y - (GH_BASE - CAR_H - 18)) < 120) t.spd = Math.max(0.5, t.spd - 2);
-  });
+  if (S.soundOn){
+    try {
+      const ctx2 = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx2.createOscillator();
+      const gain = ctx2.createGain();
+      osc.connect(gain); gain.connect(ctx2.destination);
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(320, ctx2.currentTime);
+      osc.frequency.linearRampToValueAtTime(280, ctx2.currentTime + 0.15);
+      gain.gain.setValueAtTime(0.22, ctx2.currentTime);
+      gain.gain.linearRampToValueAtTime(0, ctx2.currentTime + 0.25);
+      osc.start(ctx2.currentTime);
+      osc.stop(ctx2.currentTime + 0.28);
+    } catch(e2){}
+  }
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate(20);
 });
 
-/* ── KEYBOARD ────────────────────────────────────────────────── */
 document.addEventListener('keydown', e => {
-  if (e.key === 'ArrowLeft')  steerDir = -1;
-  else if (e.key === 'ArrowRight') steerDir = 1;
+  if (e.key === 'ArrowLeft')  steerInput = -1;
+  else if (e.key === 'ArrowRight') steerInput = 1;
+  else if (e.key === 'ArrowDown') brakeActive = true;
+  else if (e.key === 'ArrowUp'){ boostActive = true; boostTimer = 1400; }
   else if (e.key === ' ') STATE === 'playing' ? pauseGame() : STATE === 'paused' ? resumeGame() : null;
-  else if (e.key === 'b' || e.key === 'B'){ boostActive = true; boostTimer = 1200; }
-  else if (e.key === 'h' || e.key === 'H') $('btn-horn').dispatchEvent(new Event('pointerdown'));
+  else if (e.key === 'b' || e.key === 'B'){ boostActive = true; boostTimer = 1400; }
 });
 document.addEventListener('keyup', e => {
-  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight'){ steerDir = 0; carVel = 0; }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight'){ steerInput = 0; carVelX *= 0.3; }
+  if (e.key === 'ArrowDown') brakeActive = false;
 });
 
-/* ── SWIPE ON CANVAS ─────────────────────────────────────────── */
-let swipeX = null;
-gc.addEventListener('touchstart', e => { if (S.swipeOn) swipeX = e.touches[0].clientX; }, {passive: true});
+let swipeX = null, swipeStartX = null;
+gc.addEventListener('touchstart', e => {
+  if (S.swipeOn){ swipeX = e.touches[0].clientX; swipeStartX = swipeX; }
+}, {passive: true});
 gc.addEventListener('touchmove', e => {
   if (!S.swipeOn || swipeX === null) return;
   const dx = e.touches[0].clientX - swipeX;
-  steerDir = dx > 10 ? 1 : dx < -10 ? -1 : 0;
+  const totalDx = e.touches[0].clientX - swipeStartX;
+  if (Math.abs(totalDx) > 6){
+    steerInput = dx > 0 ? 1 : -1;
+    const strength = Math.min(Math.abs(dx) / 18, 1);
+    carVelX += (dx > 0 ? 1 : -1) * strength * steerAccel() * 0.6;
+  }
+  swipeX = e.touches[0].clientX;
 }, {passive: true});
-gc.addEventListener('touchend', () => { steerDir = 0; swipeX = null; carVel *= 0.4; }, {passive: true});
+gc.addEventListener('touchend', () => { steerInput = 0; swipeX = null; carVelX *= 0.5; }, {passive: true});
 
-/* ── GYROSCOPE ───────────────────────────────────────────────── */
 function requestGyroPermission(){
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function'){
@@ -475,16 +504,14 @@ window.addEventListener('deviceorientation', e => {
   gyroSteer = Math.abs(g) < dead ? 0 : Math.max(-1, Math.min(1, (g - Math.sign(g) * dead) / 18));
 });
 
-/* ── MISC ────────────────────────────────────────────────────── */
 document.addEventListener('contextmenu', e => e.preventDefault());
 document.addEventListener('gesturestart', e => e.preventDefault());
 document.addEventListener('gesturechange', e => e.preventDefault());
 
-/* ── INIT ────────────────────────────────────────────────────── */
 applySettingsUI();
 showScreen('home');
 setHudVisible(false);
 
 if ('serviceWorker' in navigator){
-  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+  window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
 }
