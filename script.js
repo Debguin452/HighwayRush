@@ -9,7 +9,7 @@ const BASE_SPD = 5.5;
 const SPAWN_MS = 500;
 const CAR_BASE_Y_OFFSET = 18;
 const CAR_BOOST_Y_LIFT = 18;
-const BRAKE_Y_LIFT = 10;
+const BRAKE_Y_LIFT = -10;
 
 const DEFAULTS = {
   soundOn: true,
@@ -17,7 +17,7 @@ const DEFAULTS = {
   gyroOn: false,
   swipeOn: true,
   boostOn: true,
-  hornOn: true,
+  hornOn: false,
   sensitivity: 5,
   nightMode: false
 };
@@ -202,9 +202,9 @@ function showToast(el, dur = 1000){
 
 function levelUp(){
   level++;
-  roadSpeed += 0.55;
+  roadSpeed += 0.45;
   levelEl.textContent = level;
-  showToast(levelToast, 1000);
+  showToast(levelToast, 400);
 }
 
 function spawnNPC(){
@@ -240,21 +240,6 @@ function draw(){
   traffic.forEach(t => ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, t.x, t.y, NPC_W, NPC_H));
 
   const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
-
-  if (boostActive){
-    ctx.globalAlpha = 0.28 + Math.random() * 0.12;
-    ctx.fillStyle = '#ff8c00';
-    ctx.beginPath();
-    ctx.ellipse(carX + CAR_W/2, carDrawY + CAR_H + 4, CAR_W/2 + 4, 14, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    const trailLen = 3;
-    for (let i = 1; i <= trailLen; i++){
-      ctx.globalAlpha = (0.18 / i);
-      ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY + i * 6, CAR_W, CAR_H);
-    }
-    ctx.globalAlpha = 1;
-  }
 
   ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY, CAR_W, CAR_H);
 
@@ -309,7 +294,7 @@ function loop(ts){
     const brakeMult = brakeActive ? 0.0 : 1;
 
     if (boostActive){
-      roadSpeed = Math.min(BASE_SPD * 2.6, roadSpeed + 0.18 * dt);
+      roadSpeed = Math.min(BASE_SPD * 2, roadSpeed + 0.05 * dt);
     } else if (brakeActive){
       roadSpeed = Math.max(BASE_SPD * 0.35, roadSpeed - 0.22 * dt);
     } else {
@@ -357,7 +342,7 @@ function loop(ts){
       const exp = {l: nb.l-14, r: nb.r+14, t: nb.t, b: nb.b};
       if (overlaps(chb, exp) && !overlaps(chb, nb) && nearMissTimer <= 0){
         nearMissTimer = 60;
-        score++;
+        score+=2;
         scoreEl.textContent = score;
         pops.push({x: t.x + NPC_W/2, y: t.y, a: 1, t: 'CLOSE!', c: '#ffcc00'});
         if (S.vibrateOn && navigator.vibrate) navigator.vibrate(30);
