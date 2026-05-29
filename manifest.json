@@ -1,0 +1,13 @@
+{
+  "name":"Highway Rush",
+  "short_name":"Highway",
+  "description":"Endless highway car game",
+  "start_url":"./",
+  "display":"standalone",
+  "orientation":"portrait",
+  "background_color":"#0a0a0f",
+  "theme_color":"#0a0a0f",
+  "icons":[
+    {"src":"images/car.png","sizes":"120x120","type":"image/png"}
+  ]
+}

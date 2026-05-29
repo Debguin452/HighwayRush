@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Highway Rush</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#0a0a0f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="./manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div id="app">
+  <canvas id="gc"></canvas>
+
+  <!-- HUD: score / pause / level -->
+  <div id="hud">
+    <div id="hud-left">
+      <div class="hud-label">SCORE</div>
+      <div id="score-val">0</div>
+    </div>
+    <div id="hud-center">
+      <button id="pause-btn" aria-label="Pause">⏸</button>
+    </div>
+    <div id="hud-right">
+      <div class="hud-label">LEVEL</div>
+      <div id="level-val">1</div>
+    </div>
+  </div>
+
+  <!-- Speed bar sits above controls -->
+  <div id="speed-bar-wrap">
+    <div id="speed-bar"></div>
+    <div id="speed-label">60</div>
+  </div>
+
+  <!-- Bottom controls: left | [horn] [boost] | right -->
+  <div id="controls">
+    <button id="btn-left" aria-label="Left">◀</button>
+    <div id="mid-btns">
+      <button id="btn-horn" aria-label="Horn">📯</button>
+      <button id="btn-boost" aria-label="Boost">⚡</button>
+    </div>
+    <button id="btn-right" aria-label="Right">▶</button>
+  </div>
+
+  <!-- HOME SCREEN -->
+  <div id="screen-home" class="screen active">
+    <div class="screen-inner">
+      <div id="logo">HIGHWAY<span>RUSH</span></div>
+      <div id="best-display"><span class="lbl">BEST</span><span id="best-score">0</span></div>
+      <button class="big-btn" id="play-btn">PLAY</button>
+      <button class="small-btn" id="settings-open-btn">⚙ SETTINGS</button>
+      <button class="small-btn" id="sound-btn">🔊 SOUND ON</button>
+    </div>
+    <div id="road-preview"></div>
+  </div>
+
+  <!-- PAUSE SCREEN -->
+  <div id="screen-pause" class="screen">
+    <div class="screen-inner">
+      <div class="overlay-title">PAUSED</div>
+      <button class="big-btn" id="resume-btn">RESUME</button>
+      <button class="small-btn" id="settings-pause-btn">⚙ SETTINGS</button>
+      <button class="small-btn" id="home-from-pause">HOME</button>
+    </div>
+  </div>
+
+  <!-- GAME OVER SCREEN -->
+  <div id="screen-gameover" class="screen">
+    <div class="screen-inner">
+      <div class="overlay-title">GAME OVER</div>
+      <div id="go-score-wrap">
+        <div class="go-stat"><span class="lbl">SCORE</span><span id="go-score">0</span></div>
+        <div class="go-stat"><span class="lbl">BEST</span><span id="go-best">0</span></div>
+        <div class="go-stat"><span class="lbl">LEVEL</span><span id="go-level">1</span></div>
+      </div>
+      <div id="new-best-badge" hidden>🏆 NEW BEST!</div>
+      <button class="big-btn" id="retry-btn">RETRY</button>
+      <button class="small-btn" id="home-from-go">HOME</button>
+    </div>
+  </div>
+
+  <!-- SETTINGS SCREEN -->
+  <div id="screen-settings" class="screen">
+    <div class="screen-inner settings-panel">
+      <div class="overlay-title" style="font-size:24px;letter-spacing:3px;">SETTINGS</div>
+
+      <div class="setting-row">
+        <span class="setting-label">🔊 Sound</span>
+        <button class="toggle-btn" id="set-sound">ON</button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">📳 Vibration</span>
+        <button class="toggle-btn" id="set-vibrate">ON</button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">🌀 Gyroscope</span>
+        <button class="toggle-btn" id="set-gyro">OFF</button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">👆 Swipe Steer</span>
+        <button class="toggle-btn" id="set-swipe">ON</button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">⚡ Boost Button</span>
+        <button class="toggle-btn" id="set-boost">ON</button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">📯 Horn Button</span>
+        <button class="toggle-btn" id="set-horn">ON</button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">🎮 Sensitivity</span>
+        <div class="slider-wrap">
+          <input type="range" id="set-sensitivity" min="1" max="10" value="5">
+          <span id="sens-val">5</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <span class="setting-label">🌙 Night Mode</span>
+        <button class="toggle-btn" id="set-night">OFF</button>
+      </div>
+
+      <button class="big-btn" id="settings-close-btn" style="margin-top:8px;">DONE</button>
+    </div>
+  </div>
+
+  <div id="level-up-toast" hidden>LEVEL UP!</div>
+  <div id="horn-toast" hidden>HONK!</div>
+  <div id="boost-toast" hidden>BOOST!</div>
+  <div id="gyro-hint" hidden>Tilt to steer</div>
+</div>
+
+<audio id="snd-crash" src="sounds/crash.mp3" preload="auto"></audio>
+<audio id="snd-drive" src="sounds/drive.mp3" loop preload="auto"></audio>
+<script src="./script.js"></script>
+</body>
+</html>
