@@ -18,7 +18,7 @@ const DEFAULTS = {
   swipeOn: true,
   boostOn: true,
   hornOn: false,
-  sensitivity: 5,
+  sensitivity: 7,
   nightMode: false
 };
 let S = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('hr_settings') || '{}'));
@@ -59,6 +59,8 @@ let score = 0, level = 1, best = +localStorage.getItem('hr_best') || 0;
 let roadSpeed = BASE_SPD, roadY = 0;
 let carX = (GW - CAR_W) / 2;
 let carVelX = 0;
+let carTilt = 0;        // current tilt angle in radians (negative = left, positive = right)
+let carTiltTarget = 0;  // target tilt angle
 let steerInput = 0;
 let gyroSteer = 0;
 let boostActive = false, boostTimer = 0;
@@ -71,9 +73,13 @@ let nearMissTimer = 0;
 
 bestEl.textContent = best;
 
-function steerAccel(){ return 0.55 + (S.sensitivity / 10) * 0.7; }
-const STEER_FRICTION = 0.78;
-const MAX_STEER_SPD  = 9;
+function steerAccel(){ return 0.38 + (S.sensitivity / 10) * 0.52; }
+const STEER_FRICTION   = 0.875;   // higher = longer glide (driftier)
+const STEER_RELEASE_FRICTION = 0.925; // even softer when no input (drift tail)
+const MAX_STEER_SPD    = 7.5;
+const MAX_TILT         = 0.28;   // max tilt (radians)
+const TILT_SPEED       = 0.2;   // how fast tilt follows velocity
+const TILT_RETURN      = 0.1;   // how fast it snaps back
 
 function showScreen(name){
   [screenHome, screenPause, screenGO, screenSettings].forEach(s => s.classList.remove('active'));
@@ -134,6 +140,7 @@ function startGame(){
   score = 0; level = 1; roadSpeed = BASE_SPD;
   carX = (GW - CAR_W) / 2; carVelX = 0; steerInput = 0; gyroSteer = 0;
   carYOffset = 0; carYOffsetTarget = 0;
+  carTilt = 0; carTiltTarget = 0;
   roadY = 0; lastTime = 0; spawnTimer = 0; deathTimer = 0;
   boostActive = false; boostTimer = 0; brakeActive = false; nearMissTimer = 0;
   scoreEl.textContent = '0'; levelEl.textContent = '1';
@@ -241,7 +248,16 @@ function draw(){
 
   const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
 
-  ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY, CAR_W, CAR_H);
+  // Draw car with tilt rotation
+  if (Math.abs(carTilt) > 0.005) {
+    ctx.save();
+    ctx.translate(carX + CAR_W / 2, carDrawY + CAR_H * 0.55);
+    ctx.rotate(carTilt);
+    ctx.drawImage(carImg, 0, 0, 120, 120, -CAR_W / 2, -CAR_H * 0.55, CAR_W, CAR_H);
+    ctx.restore();
+  } else {
+    ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY, CAR_W, CAR_H);
+  }
 
   if (particles.length){
     particles.forEach(p => {
@@ -310,10 +326,18 @@ function loop(ts){
     }
     carYOffset = lerp(carYOffset, carYOffsetTarget, 0.12 * dt);
 
+    const isHoldingSteer = steerInput !== 0 || (S.gyroOn && Math.abs(gyroSteer) > 0.05);
+    const friction = isHoldingSteer ? Math.pow(STEER_FRICTION, dt) : Math.pow(STEER_RELEASE_FRICTION, dt);
+
     carVelX += eff * steerAccel() * boostMult * brakeMult * dt;
-    carVelX *= Math.pow(STEER_FRICTION, dt);
+    carVelX *= friction;
     carVelX = Math.max(-MAX_STEER_SPD, Math.min(MAX_STEER_SPD, carVelX));
     carX = Math.max(0, Math.min(GW - CAR_W, carX + carVelX * dt));
+
+    // Tilt: lean into turns proportional to lateral velocity
+    carTiltTarget = (carVelX / MAX_STEER_SPD) * MAX_TILT;
+    const tiltRate = isHoldingSteer ? TILT_SPEED : TILT_RETURN;
+    carTilt = lerp(carTilt, carTiltTarget, tiltRate * dt);
 
     const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
     const chb = hbox(carX, carDrawY, CAR_W, CAR_H);
@@ -397,10 +421,10 @@ $('settings-close-btn').addEventListener('click', () => {
 
 $('btn-left').addEventListener('pointerdown',  e => { e.preventDefault(); steerInput = -1; });
 $('btn-right').addEventListener('pointerdown', e => { e.preventDefault(); steerInput =  1; });
-$('btn-left').addEventListener('pointerup',    e => { e.preventDefault(); steerInput = 0; carVelX *= 0.3; });
-$('btn-right').addEventListener('pointerup',   e => { e.preventDefault(); steerInput = 0; carVelX *= 0.3; });
-$('btn-left').addEventListener('pointerleave', e => { if (e.buttons > 0){ steerInput = 0; carVelX *= 0.3; }});
-$('btn-right').addEventListener('pointerleave',e => { if (e.buttons > 0){ steerInput = 0; carVelX *= 0.3; }});
+$('btn-left').addEventListener('pointerup',    e => { e.preventDefault(); steerInput = 0; carVelX *= 0.7; });
+$('btn-right').addEventListener('pointerup',   e => { e.preventDefault(); steerInput = 0; carVelX *= 0.7; });
+$('btn-left').addEventListener('pointerleave', e => { if (e.buttons > 0){ steerInput = 0; carVelX *= 0.7; }});
+$('btn-right').addEventListener('pointerleave',e => { if (e.buttons > 0){ steerInput = 0; carVelX *= 0.7; }});
 document.addEventListener('pointerup',     () => { steerInput = 0; brakeActive = false; });
 document.addEventListener('pointercancel', () => { steerInput = 0; carVelX = 0; brakeActive = false; });
 
@@ -455,7 +479,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'b' || e.key === 'B'){ boostActive = true; boostTimer = 1400; }
 });
 document.addEventListener('keyup', e => {
-  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight'){ steerInput = 0; carVelX *= 0.3; }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight'){ steerInput = 0; carVelX *= 0.7; }
   if (e.key === 'ArrowDown') brakeActive = false;
 });
 
@@ -474,7 +498,7 @@ gc.addEventListener('touchmove', e => {
   }
   swipeX = e.touches[0].clientX;
 }, {passive: true});
-gc.addEventListener('touchend', () => { steerInput = 0; swipeX = null; carVelX *= 0.5; }, {passive: true});
+gc.addEventListener('touchend', () => { steerInput = 0; swipeX = null; carVelX *= 0.75; }, {passive: true});
 
 function requestGyroPermission(){
   if (typeof DeviceOrientationEvent !== 'undefined' &&
