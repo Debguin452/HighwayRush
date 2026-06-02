@@ -139,7 +139,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);}
 }
 #lb-name-input::placeholder{color:rgba(255,255,255,0.25);letter-spacing:1px;}
 #lb-name-input:focus{border-color:var(--accent);}
-#lb-submit-status{font-family:'Rajdhani',sans-serif;font-size:13px;letter-spacing:2px;color:var(--gold);min-height:18px;text-align:center;}
+#lb-submit-status{font-family:'Orbitron',monospace;font-size:14px;letter-spacing:1px;color:var(--gold);min-height:20px;text-align:center;font-weight:700;}
 
 /* ══════════════════════════════════════════════════
    LEADERBOARD SCREEN — polished design

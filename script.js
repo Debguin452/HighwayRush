@@ -28,7 +28,7 @@ function getKey(){
   return _keyReady;
 }
 const LB_FILE = 'highway-rush-leaderboard.json';
-
+// Single file — highway-rush-top-scores.json was merged into this in v9
 const LB_CACHE_KEY = 'hr_lb_cache';
 const LB_PLAYER_KEY = 'hr_lb_player';
 const LB_IP_KEY = 'hr_lb_ip';          // stores ip→name binding
@@ -256,9 +256,51 @@ function lbLoadCache(){
 }
 function lbSaveCache(data){ localStorage.setItem(LB_CACHE_KEY, JSON.stringify(data)); }
 
+// ── One-time migration flag ───────────────────────────
+const MIGRATION_KEY = 'hr_migrated_v9';
+
 async function lbFetch(){
   try {
     const k = await getKey();
+
+    // ── Migration: absorb top-scores file and delete it (runs once) ──
+    if (!localStorage.getItem(MIGRATION_KEY)){
+      try {
+        const OLD_FILE = 'highway-rush-top-scores.json';
+        const oldText = await fetch(
+          `${STOREGIT_BASE}/api/download?name=${encodeURIComponent(OLD_FILE)}`,
+          { headers: {'X-API-Key': k} }
+        ).then(r => { if (!r.ok) throw new Error(r.status); return r.text(); });
+        const oldEntries = JSON.parse(oldText);
+        if (Array.isArray(oldEntries) && oldEntries.length){
+          // Merge into current leaderboard (higher score always wins)
+          const currentText = await fetch(
+            `${STOREGIT_BASE}/api/download?name=${encodeURIComponent(LB_FILE)}`,
+            { headers: {'X-API-Key': k} }
+          ).then(r => r.ok ? r.text() : '[]').catch(() => '[]');
+          const current = JSON.parse(currentText);
+          const base = Array.isArray(current) ? current : [];
+          // Build merged map: name -> best entry
+          const map = new Map();
+          [...base, ...oldEntries].forEach(e => {
+            const key = e.name.trim().toLowerCase();
+            const ex = map.get(key);
+            if (!ex || e.score > ex.score) map.set(key, e);
+          });
+          const merged = Array.from(map.values()).sort((a,b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
+          // Upload merged leaderboard
+          await uploadFile(LB_FILE, merged);
+          // Delete old file
+          try {
+            const files = await lbRequest('GET', 'files').catch(() => []);
+            const oldFile = Array.isArray(files) ? files.find(f => f.name === OLD_FILE || f.originalName === OLD_FILE) : null;
+            if (oldFile) await lbRequest('DELETE', `files/${oldFile.sha || oldFile.id || oldFile.name}`).catch(() => {});
+          } catch {}
+        }
+      } catch {} // old file doesn't exist — no migration needed
+      localStorage.setItem(MIGRATION_KEY, '1');
+    }
+
     const text = await fetch(
       `${STOREGIT_BASE}/api/download?name=${encodeURIComponent(LB_FILE)}`,
       { headers: {'X-API-Key': k} }
@@ -269,21 +311,27 @@ async function lbFetch(){
   } catch {
     lbData = lbLoadCache();
   }
+
+  // ── Sync hr_best from remote for this IP's player ──
+  // After fetch, find this device's player in the leaderboard and
+  // reconcile the local best — remote always wins if higher (score recovery).
+  syncBestFromRemote();
+
   return lbData;
 }
 
-// Fetch the separate "top scores per player" file
-async function lbFetchTopScores(){
-  try {
-    const k = await getKey();
-    const text = await fetch(
-      `${STOREGIT_BASE}/api/download?name=${encodeURIComponent(LB_TOP_FILE)}`,
-      { headers: {'X-API-Key': k} }
-    ).then(r => { if (!r.ok) throw new Error(r.status); return r.text(); });
-    const parsed = JSON.parse(text);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+// Restore hr_best from the remote leaderboard for this device's player.
+// Runs silently after every lbFetch so same-IP devices always show
+// the correct high score even if localStorage was cleared.
+function syncBestFromRemote(){
+  if (!playerName || !lbData.length) return;
+  const key = playerName.trim().toLowerCase();
+  const entry = lbData.find(e => e.name.trim().toLowerCase() === key);
+  if (!entry) return;
+  if (entry.score > best){
+    best = entry.score;
+    localStorage.setItem('hr_best', best);
+    bestEl.textContent = best;
   }
 }
 
@@ -301,77 +349,85 @@ async function uploadFile(fileName, data){
 
 async function lbPush(name, scoreVal){
   const ip = await fetchClientIP();
-  const entry = { name: name.trim().slice(0, 16), score: scoreVal, ts: Date.now(), ip };
+  const nameKey = name.trim().slice(0, 16).toLowerCase();
 
-  // ── 1. Update main leaderboard (best score per name) ──
-  const existing = lbLoadCache();
-  const nameKey = entry.name.toLowerCase();
-  const filtered = existing.filter(e => e.name.trim().toLowerCase() !== nameKey);
-  const prev = existing.find(e => e.name.trim().toLowerCase() === nameKey);
-  const best_entry = (prev && prev.score > entry.score) ? prev : entry;
+  // Always use live lbData (just fetched) so we compare against real remote scores
+  const base = lbData.length ? lbData : lbLoadCache();
+  const prev = base.find(e => e.name.trim().toLowerCase() === nameKey);
 
-  const merged = [...filtered, best_entry]
+  // Final score = highest of: what we're submitting, local hr_best, and remote best
+  // This prevents any downgrade and resolves conflicts by always taking the max.
+  const finalScore = Math.max(scoreVal, prev ? prev.score : 0, best);
+  const entry = { name: name.trim().slice(0, 16), score: finalScore, ts: Date.now(), ip };
+
+  const filtered = base.filter(e => e.name.trim().toLowerCase() !== nameKey);
+  const merged = [...filtered, entry]
     .sort((a, b) => b.score - a.score)
     .slice(0, MAX_LB_ENTRIES);
   lbSaveCache(merged);
   lbData = merged;
 
-  // ── 2. Update separate top-scores file ──
-  // Each player appears once with their all-time best
-  let topScores = await lbFetchTopScores();
-  const topFiltered = topScores.filter(e => e.name.trim().toLowerCase() !== nameKey);
-  const topPrev = topScores.find(e => e.name.trim().toLowerCase() === nameKey);
-  const topEntry = (topPrev && topPrev.score > entry.score) ? topPrev : { name: entry.name, score: entry.score, ip, ts: entry.ts };
-  topScores = [...topFiltered, topEntry].sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
+  // Keep local hr_best in sync too
+  if (finalScore > best){
+    best = finalScore;
+    localStorage.setItem('hr_best', best);
+    bestEl.textContent = best;
+  }
 
   try {
     await uploadFile(LB_FILE, merged);
-    await uploadFile(LB_TOP_FILE, topScores);
   } catch (e) {
     console.warn('LB push failed:', e.message);
   }
 }
 
+// renderLB: draws the list and returns {rank, score} for the current player (or null)
 function renderLB(data, myName){
   const el = $('lb-list');
   if (!data || !data.length){
     el.innerHTML = '<div class="lb-empty">No entries yet — be the first!</div>';
-    return;
+    return null;
   }
   const me = myName ? myName.trim().toLowerCase() : '';
-  const header = `<div class="lb-col-header">
-    <span class="lbh-rank">#</span>
-    <span class="lbh-name">DRIVER</span>
-    <span class="lbh-score">SCORE</span>
-  </div>`;
-  const rows = data.slice(0, 50).map((e, i) => {
+  const header = '<div class="lb-col-header"><span class="lbh-rank">#</span><span class="lbh-name">DRIVER</span><span class="lbh-score">SCORE</span></div>';
+  let myRank = null, myScore = null;
+  const rows = data.slice(0, 100).map((e, i) => {
     const rankEmoji = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '';
-    const rankNum = rankEmoji || `${i + 1}`;
+    const rankNum = rankEmoji || (i + 1);
     const rankCls = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
     const isMe = me && e.name.trim().toLowerCase() === me;
+    if (isMe){ myRank = i + 1; myScore = e.score; }
     const isMeClass = isMe ? ' lb-row--me' : '';
-    const topClass = i < 3 ? ` lb-row--top lb-row--rank${i}` : '';
-    return `<div class="lb-row${topClass}${isMeClass}${e._optimistic ? ' lb-row--optimistic' : ''}">
-      <span class="lb-rank ${rankCls}">${rankNum}</span>
-      <span class="lb-name">${escHtml(e.name)}${isMe ? '<span class="lb-you"> YOU</span>' : ''}</span>
-      <span class="lb-score">${e.score.toLocaleString()}</span>
-    </div>`;
+    const topClass = i < 3 ? ' lb-row--top lb-row--rank' + i : '';
+    return '<div class="lb-row' + topClass + isMeClass + (e._optimistic ? ' lb-row--optimistic' : '') + '" data-me="' + (isMe ? '1' : '0') + '">' +
+      '<span class="lb-rank ' + rankCls + '">' + rankNum + '</span>' +
+      '<span class="lb-name">' + escHtml(e.name) + (isMe ? '<span class="lb-you"> YOU</span>' : '') + '</span>' +
+      '<span class="lb-score">' + e.score.toLocaleString() + '</span>' +
+      '</div>';
   }).join('');
   el.innerHTML = header + rows;
+  // Auto-scroll so the player's own row is visible
+  if (me){
+    setTimeout(() => {
+      const meRow = el.querySelector('.lb-row--me');
+      if (meRow) meRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, 80);
+  }
+  return myRank !== null ? { rank: myRank, score: myScore } : null;
 }
 
 function escHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 async function openLeaderboard(){
   showScreen('leaderboard');
-  $('lb-list').innerHTML = '<div class="lb-loading"><span class="lb-spinner"></span>Loading…</div>';
+  $('lb-list').innerHTML = '<div class="lb-loading"><span class="lb-spinner"></span>Loading\u2026</div>';
   const cached = lbLoadCache();
   if (cached.length) renderLB(cached, playerName);
   try {
     const fresh = await lbFetch();
     renderLB(fresh, playerName);
   } catch {
-    // keep cached
+    // keep cached render
   }
 }
 
@@ -420,7 +476,7 @@ async function doGameOver(){
   const entryWrap = $('lb-entry-wrap');
   const statusEl = $('lb-submit-status');
 
-  // Check IP binding first — if this IP has a known name, use it silently
+  // Check IP binding — if this IP has a known name, adopt it silently
   const ipName = await getNameForIP();
   if (ipName && !playerName) {
     playerName = ipName;
@@ -428,28 +484,63 @@ async function doGameOver(){
   }
 
   if (playerName){
+    // Player is known — hide name entry, fetch live LB, push score in background
     entryWrap.style.display = 'none';
-    await lbFetch();
-    const myEntry = lbData.find(e => e.name.toLowerCase() === playerName.toLowerCase());
-    if (!myEntry || score > myEntry.score){
-      statusEl.textContent = '✓ Score submitted!';
-      const optimistic={name:playerName,score,ts:Date.now()};
-      lbData=lbData.filter(e=>e.name.toLowerCase()!==playerName.toLowerCase());
-      lbData.push(optimistic);
-      lbData.sort((a,b)=>b.score-a.score);
-      renderLB(lbData, playerName);
-      lbPush(playerName, score).catch(() => {});
+
+    // Show cached leaderboard immediately with optimistic entry
+    const nameKey = playerName.toLowerCase();
+    const cached = lbLoadCache();
+    const cachedEntry = cached.find(e => e.name.toLowerCase() === nameKey);
+    const shouldUpdate = !cachedEntry || score > cachedEntry.score;
+
+    if (shouldUpdate){
+      // Insert optimistic entry right away so player sees their position immediately
+      const optimistic = { name: playerName, score, ts: Date.now(), _optimistic: true };
+      const optimisticList = [...cached.filter(e => e.name.toLowerCase() !== nameKey), optimistic]
+        .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
+      lbSaveCache(optimisticList);
+      lbData = optimisticList;
     } else {
-      statusEl.textContent = '';
+      lbData = cached;
     }
+
+    const rankInfo = renderLB(lbData, playerName);
+    if (rankInfo){
+      statusEl.textContent = 'Rank #' + rankInfo.rank + ' \u2014 ' + rankInfo.score.toLocaleString() + ' pts';
+    }
+
+    // Fetch live data and push in background — update display when done
+    lbFetch().then(() => {
+      const liveEntry = lbData.find(e => e.name.toLowerCase() === nameKey);
+      const reallyUpdate = !liveEntry || score > liveEntry.score;
+      if (reallyUpdate){
+        // Re-insert with live data as base (lbData is now fresh from lbFetch)
+        const optimistic2 = { name: playerName, score, ts: Date.now(), _optimistic: true };
+        lbData = [...lbData.filter(e => e.name.toLowerCase() !== nameKey), optimistic2]
+          .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
+        lbSaveCache(lbData);
+        lbPush(playerName, score).then(() => {
+          // Remove _optimistic flag after confirmed push
+          lbData = lbData.map(e => e._optimistic ? { name: e.name, score: e.score, ts: e.ts } : e);
+          lbSaveCache(lbData);
+          const ri = renderLB(lbData, playerName);
+          if (ri) statusEl.textContent = 'Rank #' + ri.rank + ' \u2014 ' + ri.score.toLocaleString() + ' pts \u2713';
+        }).catch(() => {});
+      } else {
+        const ri = renderLB(lbData, playerName);
+        if (ri) statusEl.textContent = 'Rank #' + ri.rank + ' \u2014 ' + ri.score.toLocaleString() + ' pts';
+      }
+    }).catch(() => {});
+
   } else {
+    // New player — show name entry form
     entryWrap.style.display = '';
     $('lb-name-input').value = '';
     statusEl.textContent = '';
     $('lb-submit-btn').disabled = false;
+    // Pre-load leaderboard in background so it's ready
+    lbFetch().catch(() => {});
   }
-
-  lbFetch();
 }
 function goHome(){
   STATE = 'home'; sndDrive.pause();
@@ -480,8 +571,8 @@ function getHornDodgeFactor(npcX, npcY, carDrawY){
   const dx = Math.abs((npcX + NPC_W/2) - (carX + CAR_W/2));
   const dy = carDrawY - (npcY + NPC_H/2);        // positive = NPC is above (ahead)
   const dist = Math.sqrt(dx*dx + dy*dy);
-  const maxDist = 172;                            // avoidance radius
-  if (dist > maxDist || dy < -10) return 0;       // far away or behind = no effect
+  const maxDist = 200;                            // avoidance radius
+  if (dist > maxDist || dy < -40) return 0;       // far away or behind = no effect
   return Math.max(0, 1 - dist / maxDist);
 }
 
@@ -543,7 +634,16 @@ function draw(){
 
   traffic.forEach(t => {
     const drawX = t.x + (t.dodgeOffsetX || 0);
-    ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, drawX, t.y, NPC_W, NPC_H);
+    const npcTilt = t.dodgeTilt || 0;
+    if (Math.abs(npcTilt) > 0.005){
+      ctx.save();
+      ctx.translate(drawX + NPC_W/2, t.y + NPC_H * 0.5);
+      ctx.rotate(npcTilt);
+      ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, -NPC_W/2, -NPC_H*0.5, NPC_W, NPC_H);
+      ctx.restore();
+    } else {
+      ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, drawX, t.y, NPC_W, NPC_H);
+    }
   });
 
   const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
@@ -648,20 +748,24 @@ function loop(ts){
       // NPC speed scaled proportionally to roadSpeed
       t.y += (roadSpeed + t.spdRel) * dt;
 
-      // Horn avoidance — nearer NPCs dodge harder
+      // Horn avoidance — nearer NPCs dodge with gentle acceleration and visible tilt
       if (hornActive){
         const dodge = getHornDodgeFactor(t.x + (t.dodgeOffsetX||0), t.y, carDrawY);
         if (dodge > 0){
           const carCenterX = carX + CAR_W/2;
           const npcCenterX = t.x + (t.dodgeOffsetX||0) + NPC_W/2;
-          const dir = npcCenterX > carCenterX ? 1 : -1;      // dodge away from player
-          t.dodgeVelX = lerp(t.dodgeVelX || 0, dir * dodge * 4 * (roadSpeed / BASE_SPD), 0.06 * dt);
+          const dir = npcCenterX > carCenterX ? 1 : -1;
+          // Gentle acceleration (was 0.06, now 0.022) — less snappy, more natural
+          t.dodgeVelX = lerp(t.dodgeVelX || 0, dir * dodge * 2.8 * (roadSpeed / BASE_SPD), 0.022 * dt);
         }
       } else {
-        // Gradually return to lane when horn stops
-        t.dodgeVelX = lerp(t.dodgeVelX || 0, 0, 0.05 * dt);
+        // Slower return-to-lane (was 0.025, now 0.010) — car eases back gradually
+        t.dodgeVelX = lerp(t.dodgeVelX || 0, 0, 0.010 * dt);
       }
       t.dodgeOffsetX = (t.dodgeOffsetX || 0) + (t.dodgeVelX || 0) * dt;
+      // NPC tilt proportional to dodge velocity — looks like the car is actually swerving
+      const MAX_NPC_TILT = 0.18;
+      t.dodgeTilt = lerp(t.dodgeTilt || 0, (t.dodgeVelX || 0) / (2.8 * 1.5) * MAX_NPC_TILT, 0.08 * dt);
       // Clamp dodge so NPC stays on road
       const rawX = t.x + t.dodgeOffsetX;
       if (rawX < 0) t.dodgeOffsetX = -t.x;
@@ -819,25 +923,37 @@ $('lb-submit-btn').addEventListener('click', async () => {
   if (!name){ $('lb-submit-status').textContent = 'Enter your name!'; return; }
   playerName = name;
   localStorage.setItem(LB_PLAYER_KEY, name);
+  $('lb-submit-btn').disabled = true;
 
   // Bind this name to the current IP
   await bindNameToIP(name);
 
+  // Build optimistic list immediately so player sees their rank right away
+  const nameKey = name.toLowerCase();
+  const base = lbData.length ? lbData : lbLoadCache();
   const optimisticEntry = { name, score, ts: Date.now(), _optimistic: true };
-  const cached = lbLoadCache();
-  const withNew = [...cached, optimisticEntry].sort((a,b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
+  const withNew = [...base.filter(e => e.name.toLowerCase() !== nameKey), optimisticEntry]
+    .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
   lbSaveCache(withNew);
+  lbData = withNew;
 
-  $('lb-submit-status').textContent = '✓ Submitted!';
-  $('lb-submit-btn').disabled = true;
+  const rankInfo = renderLB(lbData, playerName);
+  if (rankInfo){
+    $('lb-submit-status').textContent = 'Rank #' + rankInfo.rank + ' \u2014 ' + rankInfo.score.toLocaleString() + ' pts';
+  } else {
+    $('lb-submit-status').textContent = '\u2713 Submitted!';
+  }
+  $('lb-entry-wrap').style.display = 'none';
 
+  // Push to server in background; update status when confirmed
   lbPush(name, score).then(() => {
-    $('lb-submit-status').textContent = '✓ Saved to leaderboard!';
+    lbData = lbData.map(e => e._optimistic ? { name: e.name, score: e.score, ts: e.ts } : e);
+    lbSaveCache(lbData);
+    const ri = renderLB(lbData, playerName);
+    if (ri) $('lb-submit-status').textContent = 'Rank #' + ri.rank + ' \u2014 ' + ri.score.toLocaleString() + ' pts \u2713';
   }).catch(() => {
-    $('lb-submit-status').textContent = '✓ Saved locally (syncing…)';
+    $('lb-submit-status').textContent = (rankInfo ? 'Rank #' + rankInfo.rank + ' ' : '') + '(syncing\u2026)';
   });
-
-  setTimeout(() => { $('lb-entry-wrap').style.display = 'none'; }, 1200);
 });
 
 /* ── STEER BUTTONS ───────────────────────────────────── */
@@ -937,7 +1053,7 @@ setHudVisible(false);
 drawSpeedometer(60);
 lbFetch();
 
-// Pre-load IP and check if this IP already has a bound name
+// Pre-load IP, resolve player name, then sync best score from remote
 (async () => {
   const ip = await fetchClientIP();
   if (ip && !playerName) {
@@ -947,6 +1063,10 @@ lbFetch();
       localStorage.setItem(LB_PLAYER_KEY, mapped);
     }
   }
+  // Now that playerName is definitely set (if it exists), sync best from
+  // whatever lbFetch already loaded — covers the case where lbFetch finished
+  // before we knew the player's name.
+  syncBestFromRemote();
 })();
 
 if ('serviceWorker' in navigator)
