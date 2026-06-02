@@ -17,7 +17,7 @@
 <div id="app">
   <canvas id="gc"></canvas>
 
-  <!-- HUD: score | pause | speedo+horn | level -->
+  <!-- HUD: score | pause | speedo | level -->
   <div id="hud">
     <div id="hud-left">
       <div class="hud-label">SCORE</div>
@@ -29,23 +29,23 @@
     <div id="hud-speedo">
       <canvas id="speedo-canvas" width="54" height="54"></canvas>
     </div>
-    <div id="hud-horn">
-      <button id="btn-horn" aria-label="Horn">📯</button>
-    </div>
     <div id="hud-right">
       <div class="hud-label">LEVEL</div>
       <div id="level-val">1</div>
     </div>
   </div>
 
-  <!-- Bottom controls: left | [boost] [brake] | right -->
+  <!-- Bottom controls: left | [boost] [brake] | right+horn -->
   <div id="controls">
     <button id="btn-left" aria-label="Left">◀</button>
     <div id="mid-btns">
       <button id="btn-boost" aria-label="Boost">⚡</button>
       <button id="btn-brake" aria-label="Brake">🛑</button>
     </div>
-    <button id="btn-right" aria-label="Right">▶</button>
+    <div id="right-col">
+      <button id="btn-horn" aria-label="Horn">📯</button>
+      <button id="btn-right" aria-label="Right">▶</button>
+    </div>
   </div>
 
   <!-- HOME SCREEN -->
@@ -80,7 +80,7 @@
         <div class="go-stat"><span class="lbl">LEVEL</span><span id="go-level">1</span></div>
       </div>
       <div id="new-best-badge" hidden>🏆 NEW BEST!</div>
-      <!-- name entry -->
+      <!-- name entry — shown only once -->
       <div id="lb-entry-wrap">
         <input id="lb-name-input" type="text" maxlength="16" placeholder="Your name…" autocomplete="off" spellcheck="false">
         <button class="big-btn" id="lb-submit-btn">SUBMIT SCORE</button>

@@ -235,12 +235,15 @@ async function lbFetch(){
 async function lbPush(name, scoreVal){
   const entry = { name: name.trim().slice(0, 16), score: scoreVal, ts: Date.now() };
   const existing = lbLoadCache();
-  const merged = [...existing, entry]
+
+  // Merge: for same name, keep the higher score
+  const nameKey = entry.name.toLowerCase();
+  const filtered = existing.filter(e => e.name.trim().toLowerCase() !== nameKey);
+  const prev = existing.find(e => e.name.trim().toLowerCase() === nameKey);
+  const best_entry = (prev && prev.score > entry.score) ? prev : entry;
+
+  const merged = [...filtered, best_entry]
     .sort((a, b) => b.score - a.score)
-    .reduce((acc, e) => {
-      if (!acc.find(x => x.name.toLowerCase() === e.name.toLowerCase())) acc.push(e);
-      return acc;
-    }, [])
     .slice(0, MAX_LB_ENTRIES);
   lbSaveCache(merged);
   lbData = merged;
@@ -324,11 +327,31 @@ function doGameOver(){
   goBestEl.textContent  = best;
   goLevelEl.textContent = level;
   newBestBadge.hidden   = !isNew;
-  $('lb-name-input').value = playerName;
-  $('lb-submit-status').textContent = '';
   setHudVisible(false);
   showScreen('gameover');
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate([80, 40, 80]);
+
+  const entryWrap = $('lb-entry-wrap');
+  const statusEl = $('lb-submit-status');
+
+  if (playerName){
+    // Known player — hide entry form, auto-submit if new best
+    entryWrap.style.display = 'none';
+    // Always update leaderboard if this score beats their stored best
+    const stored = lbLoadCache();
+    const myEntry = stored.find(e => e.name.toLowerCase() === playerName.toLowerCase());
+    if (!myEntry || score > myEntry.score){
+      statusEl.textContent = '✓ Score submitted!';
+      lbPush(playerName, score).catch(() => {});
+    }
+  } else {
+    // First time — show entry form
+    entryWrap.style.display = '';
+    $('lb-name-input').value = '';
+    statusEl.textContent = '';
+    $('lb-submit-btn').disabled = false;
+  }
+
   lbFetch();
 }
 function goHome(){
@@ -357,12 +380,13 @@ function levelUp(){
 function spawnNPC(){
   const lane = Math.floor(Math.random() * LANE_X.length);
   if (traffic.some(t => t.lane === lane && t.y < SAFE_GAP)) return;
-  const spd = roadSpeed - 0.6 + Math.random() * 1.95;
-  traffic.push({ lane, x: LANE_X[lane] - NPC_W/2, y: -NPC_H, spd, imgIdx: Math.floor(Math.random() * npcImgs.length) });
+  const spdRel = -0.6 + Math.random() * 1.95; // relative to roadSpeed
+  traffic.push({ lane, x: LANE_X[lane] - NPC_W/2, y: -NPC_H, spd: roadSpeed + spdRel, spdRel, imgIdx: Math.floor(Math.random() * npcImgs.length) });
   if (level >= 2 && Math.random() < 0.20){
     const lane2 = (lane + 1 + Math.floor(Math.random() * 2)) % LANE_X.length;
+    const spdRel2 = spdRel + Math.random() * 0.5;
     if (!traffic.some(t => t.lane === lane2 && t.y < SAFE_GAP))
-      traffic.push({ lane: lane2, x: LANE_X[lane2] - NPC_W/2, y: -NPC_H - 30, spd: spd + Math.random() * 0.5, imgIdx: Math.floor(Math.random() * npcImgs.length) });
+      traffic.push({ lane: lane2, x: LANE_X[lane2] - NPC_W/2, y: -NPC_H - 30, spd: roadSpeed + spdRel2, spdRel: spdRel2, imgIdx: Math.floor(Math.random() * npcImgs.length) });
   }
 }
 
@@ -387,11 +411,6 @@ function draw(){
 
   if (boostActive){
     ctx.save();
-    ctx.globalAlpha = 0.25 + Math.random() * 0.1;
-    ctx.fillStyle = '#ff8c00';
-    ctx.beginPath();
-    ctx.ellipse(carX + CAR_W/2, carDrawY + CAR_H + 2, CAR_W/2 + 3, 12, 0, 0, Math.PI * 2);
-    ctx.fill();
     for (let i = 1; i <= 3; i++){
       ctx.globalAlpha = 0.15 / i;
       ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY + i * 5, CAR_W, CAR_H);
@@ -444,9 +463,13 @@ function loop(ts){
 
     if (boostActive){ boostTimer -= dt * 16.667; if (boostTimer <= 0) boostActive = false; }
 
-    if (boostActive)       roadSpeed = Math.min(BASE_SPD * 2, roadSpeed + 0.05 * dt);
-    else if (brakeActive)  roadSpeed = Math.max(BASE_SPD * 0.35, roadSpeed - 0.22 * dt);
-    else                   roadSpeed = lerp(roadSpeed, BASE_SPD + (level-1)*0.55, 0.012*dt);
+    const targetSpeed = boostActive ? BASE_SPD * 2 :
+                        brakeActive ? BASE_SPD * 0.35 :
+                        BASE_SPD + (level - 1) * 0.55;
+    const speedLerp = boostActive ? 0.05 * dt :
+                      brakeActive ? 0.08 * dt :   // smooth brake
+                      0.012 * dt;
+    roadSpeed = lerp(roadSpeed, targetSpeed, speedLerp);
 
     carYOffsetTarget = boostActive ? CAR_BOOST_Y_LIFT : brakeActive ? BRAKE_Y_LIFT : 0;
     carYOffset = lerp(carYOffset, carYOffsetTarget, 0.12 * dt);
@@ -466,7 +489,8 @@ function loop(ts){
 
     for (let i = traffic.length - 1; i >= 0; i--){
       const t = traffic[i];
-      t.y += (t.spd + 2) * dt;
+      // NPC moves at roadSpeed + its own relative offset (so they mirror road scroll)
+      t.y += (roadSpeed + t.spdRel) * dt;
       if (t.y > GH_BASE + NPC_H){
         traffic.splice(i, 1); score++;
         scoreEl.textContent = score;
@@ -596,6 +620,7 @@ $('lb-submit-btn').addEventListener('click', async () => {
   playerName = name;
   localStorage.setItem(LB_PLAYER_KEY, name);
 
+  // Optimistic UI
   const optimisticEntry = { name, score, ts: Date.now(), _optimistic: true };
   const cached = lbLoadCache();
   const withNew = [...cached, optimisticEntry].sort((a,b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
@@ -609,6 +634,9 @@ $('lb-submit-btn').addEventListener('click', async () => {
   }).catch(() => {
     $('lb-submit-status').textContent = '✓ Saved locally (syncing…)';
   });
+
+  // Hide form forever — name is now stored
+  setTimeout(() => { $('lb-entry-wrap').style.display = 'none'; }, 1200);
 });
 
 /* ── STEER BUTTONS ───────────────────────────────────── */
