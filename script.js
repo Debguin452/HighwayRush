@@ -5,8 +5,8 @@ const LANE_X = [22, 63, 104, 145, 186, 227, 275, 322, 350];
 const NPC_IMGS = ['./images/traffic.png','./images/traffic2.png','./images/traffic3.png','./images/traffic4.png'];
 const CAR_W = 48, CAR_H = 70, NPC_W = 46, NPC_H = 68;
 const SAFE_GAP = 160, HITPAD = 10;
-const BASE_SPD = 4;           // reduced base speed
-const SPAWN_MS = 700;         // slower spawn rate
+const BASE_SPD = 5.5;          
+const SPAWN_MS = 600;         
 const CAR_BASE_Y_OFFSET = 18;
 const CAR_BOOST_Y_LIFT = 18;
 const BRAKE_Y_LIFT = -10;
