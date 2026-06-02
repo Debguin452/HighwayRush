@@ -17,7 +17,7 @@
 <div id="app">
   <canvas id="gc"></canvas>
 
-  <!-- HUD: score | pause | speedo | level -->
+  <!-- HUD: score | pause | speedo | level  (NO horn here) -->
   <div id="hud">
     <div id="hud-left">
       <div class="hud-label">SCORE</div>
@@ -35,17 +35,20 @@
     </div>
   </div>
 
-  <!-- Bottom controls: left | [boost] [brake] | right+horn -->
+  <!--
+    Controls layout (5 zones, equal outer columns):
+    [LEFT]  [BOOST] [HORN] [BRAKE]  [RIGHT]
+    Left and Right are the same flex width.
+    Horn sits in the middle group alongside boost & brake.
+  -->
   <div id="controls">
-    <button id="btn-left" aria-label="Left">◀</button>
+    <button id="btn-left"  aria-label="Left">◀</button>
     <div id="mid-btns">
       <button id="btn-boost" aria-label="Boost">⚡</button>
+      <button id="btn-horn"  aria-label="Horn">📯</button>
       <button id="btn-brake" aria-label="Brake">🛑</button>
     </div>
-    <div id="right-col">
-      <button id="btn-horn" aria-label="Horn">📯</button>
-      <button id="btn-right" aria-label="Right">▶</button>
-    </div>
+    <button id="btn-right" aria-label="Right">▶</button>
   </div>
 
   <!-- HOME SCREEN -->
@@ -80,7 +83,7 @@
         <div class="go-stat"><span class="lbl">LEVEL</span><span id="go-level">1</span></div>
       </div>
       <div id="new-best-badge" hidden>🏆 NEW BEST!</div>
-      <!-- name entry — shown only once -->
+      <!-- name entry — shown only first time -->
       <div id="lb-entry-wrap">
         <input id="lb-name-input" type="text" maxlength="16" placeholder="Your name…" autocomplete="off" spellcheck="false">
         <button class="big-btn" id="lb-submit-btn">SUBMIT SCORE</button>
@@ -93,10 +96,12 @@
 
   <!-- LEADERBOARD SCREEN -->
   <div id="screen-leaderboard" class="screen">
-    <div class="screen-inner">
-      <div class="overlay-title" style="font-size:26px;letter-spacing:3px;">🏆 TOP DRIVERS</div>
+    <div class="screen-inner lb-screen-inner">
+      <div class="lb-header-row">
+        <div class="overlay-title lb-title">🏆 TOP DRIVERS</div>
+      </div>
       <div id="lb-list-wrap">
-        <div id="lb-list"><div class="lb-loading">Loading…</div></div>
+        <div id="lb-list"><div class="lb-loading"><span class="lb-spinner"></span>Loading…</div></div>
       </div>
       <button class="big-btn" id="lb-close-btn">CLOSE</button>
     </div>
@@ -142,9 +147,8 @@
   </div>
 
   <div id="level-up-toast" hidden>LEVEL UP!</div>
-  <div id="horn-toast" hidden>📯 HONK!</div>
-  <div id="boost-toast" hidden>BOOST!</div>
-  <div id="gyro-hint" hidden>Tilt to steer</div>
+  <div id="boost-toast"    hidden>BOOST!</div>
+  <div id="gyro-hint"      hidden>Tilt to steer</div>
 </div>
 
 <audio id="snd-crash" src="sounds/crash.mp3" preload="auto"></audio>

@@ -5,11 +5,15 @@ const LANE_X = [22, 63, 104, 145, 186, 227, 275, 322, 350];
 const NPC_IMGS = ['./images/traffic.png','./images/traffic2.png','./images/traffic3.png','./images/traffic4.png'];
 const CAR_W = 48, CAR_H = 70, NPC_W = 46, NPC_H = 68;
 const SAFE_GAP = 160, HITPAD = 10;
-const BASE_SPD = 7;
-const SPAWN_MS = 500;
+const BASE_SPD = 4;           // reduced base speed
+const SPAWN_MS = 700;         // slower spawn rate
 const CAR_BASE_Y_OFFSET = 18;
 const CAR_BOOST_Y_LIFT = 18;
 const BRAKE_Y_LIFT = -10;
+
+// Barrier positions (left and right road edges)
+const BARRIER_L = 0;
+const BARRIER_R = GW - CAR_W;
 
 const STOREGIT_BASE = 'https://storegit.pages.dev';
 let STOREGIT_KEY = '';
@@ -24,8 +28,10 @@ function getKey(){
   return _keyReady;
 }
 const LB_FILE = 'highway-rush-leaderboard.json';
+const LB_TOP_FILE = 'highway-rush-top-scores.json'; // separate file for all players' top scores
 const LB_CACHE_KEY = 'hr_lb_cache';
 const LB_PLAYER_KEY = 'hr_lb_player';
+const LB_IP_KEY = 'hr_lb_ip';          // stores ip→name binding
 const MAX_LB_ENTRIES = 100;
 
 const DEFAULTS = {
@@ -46,7 +52,7 @@ const screenGO = $('screen-gameover'), screenSettings = $('screen-settings');
 const screenLB = $('screen-leaderboard');
 const goScoreEl = $('go-score'), goBestEl = $('go-best'), goLevelEl = $('go-level');
 const bestEl = $('best-score'), newBestBadge = $('new-best-badge'), levelToast = $('level-up-toast');
-const hornToast = $('horn-toast'), boostToast = $('boost-toast'), gyroHint = $('gyro-hint');
+const boostToast = $('boost-toast'), gyroHint = $('gyro-hint');
 const sndCrash = $('snd-crash'), sndDrive = $('snd-drive');
 
 const HUD_H = 58, CTRL_H = 90;
@@ -75,6 +81,9 @@ let boostActive = false, boostTimer = 0, brakeActive = false;
 let carYOffset = 0, carYOffsetTarget = 0;
 let traffic = [], particles = [], pops = [];
 let raf = null, lastTime = 0, spawnTimer = 0, deathTimer = 0, nearMissTimer = 0;
+
+// Horn avoidance state
+let hornActive = false, hornTimer = 0;
 
 bestEl.textContent = best;
 
@@ -193,10 +202,41 @@ $('set-sensitivity').addEventListener('input', e => {
   S.sensitivity = +e.target.value; $('sens-val').textContent = S.sensitivity; saveSett();
 });
 
+/* ── IP DETECTION ────────────────────────────────────── */
+let clientIP = localStorage.getItem(LB_IP_KEY) || '';
+async function fetchClientIP(){
+  if (clientIP) return clientIP;
+  try {
+    const r = await fetch('https://api.ipify.org?format=json');
+    const d = await r.json();
+    clientIP = d.ip || '';
+    if (clientIP) localStorage.setItem(LB_IP_KEY, clientIP);
+  } catch { clientIP = ''; }
+  return clientIP;
+}
+fetchClientIP();
+
 /* ── LEADERBOARD (StoreGit + optimistic cache) ───────── */
 let lbData = [];
-let lbSyncing = false;
 let playerName = localStorage.getItem(LB_PLAYER_KEY) || '';
+
+// ip→name map stored locally
+let ipNameMap = {};
+try { ipNameMap = JSON.parse(localStorage.getItem('hr_ip_name') || '{}'); } catch { ipNameMap = {}; }
+function saveIpNameMap(){ localStorage.setItem('hr_ip_name', JSON.stringify(ipNameMap)); }
+
+// Check if the current IP already has a registered name
+async function getNameForIP(){
+  const ip = await fetchClientIP();
+  if (!ip) return null;
+  return ipNameMap[ip] || null;
+}
+async function bindNameToIP(name){
+  const ip = await fetchClientIP();
+  if (!ip) return;
+  ipNameMap[ip] = name;
+  saveIpNameMap();
+}
 
 async function lbRequest(method, path, body){
   const k = await getKey();
@@ -232,11 +272,39 @@ async function lbFetch(){
   return lbData;
 }
 
-async function lbPush(name, scoreVal){
-  const entry = { name: name.trim().slice(0, 16), score: scoreVal, ts: Date.now() };
-  const existing = lbLoadCache();
+// Fetch the separate "top scores per player" file
+async function lbFetchTopScores(){
+  try {
+    const k = await getKey();
+    const text = await fetch(
+      `${STOREGIT_BASE}/api/download?name=${encodeURIComponent(LB_TOP_FILE)}`,
+      { headers: {'X-API-Key': k} }
+    ).then(r => { if (!r.ok) throw new Error(r.status); return r.text(); });
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
-  // Merge: for same name, keep the higher score
+// Upload a file to StoreGit
+async function uploadFile(fileName, data){
+  const content = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+  const files = await lbRequest('GET', 'files').catch(() => []);
+  const existing = Array.isArray(files) ? files.find(f => f.name === fileName || f.originalName === fileName) : null;
+  if (existing){
+    await lbRequest('POST', 'upload', { name: fileName, content, sha: existing.sha });
+  } else {
+    await lbRequest('POST', 'upload', { name: fileName, content });
+  }
+}
+
+async function lbPush(name, scoreVal){
+  const ip = await fetchClientIP();
+  const entry = { name: name.trim().slice(0, 16), score: scoreVal, ts: Date.now(), ip };
+
+  // ── 1. Update main leaderboard (best score per name) ──
+  const existing = lbLoadCache();
   const nameKey = entry.name.toLowerCase();
   const filtered = existing.filter(e => e.name.trim().toLowerCase() !== nameKey);
   const prev = existing.find(e => e.name.trim().toLowerCase() === nameKey);
@@ -248,46 +316,63 @@ async function lbPush(name, scoreVal){
   lbSaveCache(merged);
   lbData = merged;
 
-  const content = btoa(unescape(encodeURIComponent(JSON.stringify(merged))));
+  // ── 2. Update separate top-scores file ──
+  // Each player appears once with their all-time best
+  let topScores = await lbFetchTopScores();
+  const topFiltered = topScores.filter(e => e.name.trim().toLowerCase() !== nameKey);
+  const topPrev = topScores.find(e => e.name.trim().toLowerCase() === nameKey);
+  const topEntry = (topPrev && topPrev.score > entry.score) ? topPrev : { name: entry.name, score: entry.score, ip, ts: entry.ts };
+  topScores = [...topFiltered, topEntry].sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
+
   try {
-    const files = await lbRequest('GET', 'files');
-    const existing_file = Array.isArray(files) ? files.find(f => f.name === LB_FILE || f.originalName === LB_FILE) : null;
-    if (existing_file){
-      await lbRequest('POST', 'upload', { name: LB_FILE, content, sha: existing_file.sha });
-    } else {
-      await lbRequest('POST', 'upload', { name: LB_FILE, content });
-    }
+    await uploadFile(LB_FILE, merged);
+    await uploadFile(LB_TOP_FILE, topScores);
   } catch (e) {
-    console.warn('LB push failed (will retry on next submit):', e.message);
+    console.warn('LB push failed:', e.message);
   }
 }
 
 function renderLB(data, myName){
   const el = $('lb-list');
   if (!data || !data.length){
-    el.innerHTML = '<div class="lb-loading">No entries yet — be first!</div>';
+    el.innerHTML = '<div class="lb-empty">No entries yet — be the first!</div>';
     return;
   }
   const me = myName ? myName.trim().toLowerCase() : '';
-  el.innerHTML = data.slice(0, 50).map((e, i) => {
+  const header = `<div class="lb-col-header">
+    <span class="lbh-rank">#</span>
+    <span class="lbh-name">DRIVER</span>
+    <span class="lbh-score">SCORE</span>
+  </div>`;
+  const rows = data.slice(0, 50).map((e, i) => {
+    const rankEmoji = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '';
+    const rankNum = rankEmoji || `${i + 1}`;
     const rankCls = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
-    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}`;
     const isMe = me && e.name.trim().toLowerCase() === me;
-    return `<div class="lb-row${e._optimistic ? ' optimistic' : ''}${isMe ? ' me' : ''}">
-      <span class="lb-rank ${rankCls}">${medal}</span>
-      <span class="lb-name">${e.name}</span>
-      <span class="lb-score">${e.score}</span>
+    const isMeClass = isMe ? ' lb-row--me' : '';
+    const topClass = i < 3 ? ` lb-row--top lb-row--rank${i}` : '';
+    return `<div class="lb-row${topClass}${isMeClass}${e._optimistic ? ' lb-row--optimistic' : ''}">
+      <span class="lb-rank ${rankCls}">${rankNum}</span>
+      <span class="lb-name">${escHtml(e.name)}${isMe ? '<span class="lb-you"> YOU</span>' : ''}</span>
+      <span class="lb-score">${e.score.toLocaleString()}</span>
     </div>`;
   }).join('');
+  el.innerHTML = header + rows;
 }
+
+function escHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 async function openLeaderboard(){
   showScreen('leaderboard');
-  $('lb-list').innerHTML = '<div class="lb-loading">Loading…</div>';
+  $('lb-list').innerHTML = '<div class="lb-loading"><span class="lb-spinner"></span>Loading…</div>';
   const cached = lbLoadCache();
   if (cached.length) renderLB(cached, playerName);
-  const fresh = await lbFetch();
-  renderLB(fresh, playerName);
+  try {
+    const fresh = await lbFetch();
+    renderLB(fresh, playerName);
+  } catch {
+    // keep cached
+  }
 }
 
 /* ── GAME LIFECYCLE ──────────────────────────────────── */
@@ -298,6 +383,7 @@ function startGame(){
   carYOffset = 0; carYOffsetTarget = 0; carTilt = 0; carTiltTarget = 0;
   roadY = 0; lastTime = 0; spawnTimer = 0; deathTimer = 0;
   boostActive = false; boostTimer = 0; brakeActive = false; nearMissTimer = 0;
+  hornActive = false; hornTimer = 0;
   speedoNeedle = 60;
   scoreEl.textContent = '0'; levelEl.textContent = '1';
   STATE = 'playing';
@@ -318,7 +404,7 @@ function resumeGame(){
   if (S.soundOn) sndDrive.play().catch(() => {});
   raf = requestAnimationFrame(loop);
 }
-function doGameOver(){
+async function doGameOver(){
   STATE = 'gameover';
   const isNew = score > best;
   if (isNew){ best = score; localStorage.setItem('hr_best', best); }
@@ -334,18 +420,24 @@ function doGameOver(){
   const entryWrap = $('lb-entry-wrap');
   const statusEl = $('lb-submit-status');
 
+  // Check IP binding first — if this IP has a known name, use it silently
+  const ipName = await getNameForIP();
+  if (ipName && !playerName) {
+    playerName = ipName;
+    localStorage.setItem(LB_PLAYER_KEY, playerName);
+  }
+
   if (playerName){
-    // Known player — hide entry form, auto-submit if new best
     entryWrap.style.display = 'none';
-    // Always update leaderboard if this score beats their stored best
     const stored = lbLoadCache();
     const myEntry = stored.find(e => e.name.toLowerCase() === playerName.toLowerCase());
     if (!myEntry || score > myEntry.score){
       statusEl.textContent = '✓ Score submitted!';
       lbPush(playerName, score).catch(() => {});
+    } else {
+      statusEl.textContent = '';
     }
   } else {
-    // First time — show entry form
     entryWrap.style.display = '';
     $('lb-name-input').value = '';
     statusEl.textContent = '';
@@ -373,28 +465,66 @@ function showToast(el, dur = 1000){
   setTimeout(() => { el.classList.remove('show'); setTimeout(() => { el.hidden = true; }, 250); }, dur);
 }
 function levelUp(){
-  level++; roadSpeed += 0.45; levelEl.textContent = level; showToast(levelToast, 400);
+  level++; roadSpeed += 0.3; levelEl.textContent = level; showToast(levelToast, 400);
+}
+
+/* ── NPC AVOIDANCE ON HORN ───────────────────────────── */
+// Returns how much an NPC should dodge (0-1) based on distance to player car.
+// Closer = stronger avoidance
+function getHornDodgeFactor(npcX, npcY, carDrawY){
+  const dx = Math.abs((npcX + NPC_W/2) - (carX + CAR_W/2));
+  const dy = carDrawY - (npcY + NPC_H/2);        // positive = NPC is above (ahead)
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  const maxDist = 200;                            // avoidance radius
+  if (dist > maxDist || dy < -40) return 0;       // far away or behind = no effect
+  return Math.max(0, 1 - dist / maxDist);
 }
 
 /* ── SPAWN ───────────────────────────────────────────── */
 function spawnNPC(){
   const lane = Math.floor(Math.random() * LANE_X.length);
   if (traffic.some(t => t.lane === lane && t.y < SAFE_GAP)) return;
-  // spdRel: how much faster the NPC scrolls down vs road. Always positive so they approach player.
-  const spdRel = 1.5 + Math.random() * 3.0;
-  traffic.push({ lane, x: LANE_X[lane] - NPC_W/2, y: -NPC_H, spdRel, imgIdx: Math.floor(Math.random() * npcImgs.length) });
+  // NPC speed now scales with roadSpeed so they stay relevant at all levels
+  const baseRel = 0.8 + Math.random() * 1.2;     // reduced relative speed
+  const spdRel = baseRel * (roadSpeed / BASE_SPD);
+  traffic.push({
+    lane, x: LANE_X[lane] - NPC_W/2, y: -NPC_H,
+    spdRel, imgIdx: Math.floor(Math.random() * npcImgs.length),
+    dodgeVelX: 0, dodgeOffsetX: 0                // for horn avoidance
+  });
   if (level >= 2 && Math.random() < 0.20){
     const lane2 = (lane + 1 + Math.floor(Math.random() * 2)) % LANE_X.length;
-    const spdRel2 = 1.5 + Math.random() * 3.0;
+    const spdRel2 = (0.8 + Math.random() * 1.2) * (roadSpeed / BASE_SPD);
     if (!traffic.some(t => t.lane === lane2 && t.y < SAFE_GAP))
-      traffic.push({ lane: lane2, x: LANE_X[lane2] - NPC_W/2, y: -NPC_H - 30, spdRel: spdRel2, imgIdx: Math.floor(Math.random() * npcImgs.length) });
+      traffic.push({
+        lane: lane2, x: LANE_X[lane2] - NPC_W/2, y: -NPC_H - 30,
+        spdRel: spdRel2, imgIdx: Math.floor(Math.random() * npcImgs.length),
+        dodgeVelX: 0, dodgeOffsetX: 0
+      });
   }
 }
 
-/* ── COLLISION ───────────────────────────────────────── */
+/* ── COLLISION HELPERS ───────────────────────────────── */
 function hbox(x, y, w, h){ return {l: x+HITPAD, r: x+w-HITPAD, t: y+HITPAD, b: y+h-HITPAD}; }
 function overlaps(a, b){ return !(a.b < b.t || a.t > b.b || a.r < b.l || a.l > b.r); }
 function lerp(a, b, t){ return a + (b - a) * t; }
+
+/* ── CAR–BARRIER COLLISION ───────────────────────────── */
+function checkBarrierCollision(){
+  if (carX < BARRIER_L){
+    carX = BARRIER_L;
+    carVelX = -carVelX * 0.4;        // bounce back slightly
+    spawnExplosion(carX + CAR_W/2, GH_BASE - CAR_H - CAR_BASE_Y_OFFSET);
+    return true;
+  }
+  if (carX > BARRIER_R){
+    carX = BARRIER_R;
+    carVelX = -carVelX * 0.4;
+    spawnExplosion(carX + CAR_W/2, GH_BASE - CAR_H - CAR_BASE_Y_OFFSET);
+    return true;
+  }
+  return false;
+}
 
 /* ── DRAW ────────────────────────────────────────────── */
 function draw(){
@@ -406,7 +536,10 @@ function draw(){
     ctx.fillStyle = '#1a1a1f'; ctx.fillRect(0, 0, GW, GH_BASE);
   }
 
-  traffic.forEach(t => ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, t.x, t.y, NPC_W, NPC_H));
+  traffic.forEach(t => {
+    const drawX = t.x + (t.dodgeOffsetX || 0);
+    ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, drawX, t.y, NPC_W, NPC_H);
+  });
 
   const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
 
@@ -463,12 +596,14 @@ function loop(ts){
     const eff = steerInput !== 0 ? steerInput : (S.gyroOn ? gyroSteer : 0);
 
     if (boostActive){ boostTimer -= dt * 16.667; if (boostTimer <= 0) boostActive = false; }
+    if (hornActive)  { hornTimer  -= dt * 16.667; if (hornTimer  <= 0) hornActive  = false; }
 
+    // Speed scaling: all dependent on roadSpeed
     const targetSpeed = boostActive ? BASE_SPD * 2 :
                         brakeActive ? BASE_SPD * 0.35 :
-                        BASE_SPD + (level - 1) * 0.55;
+                        BASE_SPD + (level - 1) * 0.35;   // gentler level ramp
     const speedLerp = boostActive ? 0.05 * dt :
-                      brakeActive ? 0.08 * dt :   // smooth brake
+                      brakeActive ? 0.08 * dt :
                       0.012 * dt;
     roadSpeed = lerp(roadSpeed, targetSpeed, speedLerp);
 
@@ -482,18 +617,51 @@ function loop(ts){
     carVelX = Math.max(-MAX_STEER_SPD, Math.min(MAX_STEER_SPD, carVelX));
     carX = Math.max(0, Math.min(GW - CAR_W, carX + carVelX * dt));
 
+    // Barrier collision — hard walls, causes game over on strong impact
+    if (checkBarrierCollision()){
+      if (Math.abs(carVelX) > 3){          // only crash on fast impact
+        spawnExplosion(carX + CAR_W/2, GH_BASE - CAR_H - CAR_BASE_Y_OFFSET);
+        STATE = 'dying'; deathTimer = 520;
+        sndDrive.pause();
+        if (S.soundOn){ sndCrash.currentTime = 0; sndCrash.play().catch(() => {}); }
+        gc.classList.add('shake');
+        setTimeout(() => gc.classList.remove('shake'), 400);
+        raf = requestAnimationFrame(loop);
+        return;
+      }
+    }
+
     carTiltTarget = (carVelX / MAX_STEER_SPD) * MAX_TILT;
     carTilt = lerp(carTilt, carTiltTarget, (isHolding ? TILT_SPEED : TILT_RETURN) * dt);
 
     const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
     const chb = hbox(carX, carDrawY, CAR_W, CAR_H);
 
+    // ── NPC update ──
     for (let i = traffic.length - 1; i >= 0; i--){
       const t = traffic[i];
-      // Road scrolls down at roadSpeed. NPC is a real car going slower than player,
-      // so from player's frame it drifts DOWN. spdRel is the extra drift speed.
-      // When roadSpeed changes (boost/brake), NPCs automatically adapt.
+      // NPC speed scaled proportionally to roadSpeed
       t.y += (roadSpeed + t.spdRel) * dt;
+
+      // Horn avoidance — nearer NPCs dodge harder
+      if (hornActive){
+        const dodge = getHornDodgeFactor(t.x + (t.dodgeOffsetX||0), t.y, carDrawY);
+        if (dodge > 0){
+          const carCenterX = carX + CAR_W/2;
+          const npcCenterX = t.x + (t.dodgeOffsetX||0) + NPC_W/2;
+          const dir = npcCenterX > carCenterX ? 1 : -1;      // dodge away from player
+          t.dodgeVelX = lerp(t.dodgeVelX || 0, dir * dodge * 4 * (roadSpeed / BASE_SPD), 0.25 * dt);
+        }
+      } else {
+        // Gradually return to lane when horn stops
+        t.dodgeVelX = lerp(t.dodgeVelX || 0, 0, 0.1 * dt);
+      }
+      t.dodgeOffsetX = (t.dodgeOffsetX || 0) + (t.dodgeVelX || 0) * dt;
+      // Clamp dodge so NPC stays on road
+      const rawX = t.x + t.dodgeOffsetX;
+      if (rawX < 0) t.dodgeOffsetX = -t.x;
+      if (rawX + NPC_W > GW) t.dodgeOffsetX = GW - NPC_W - t.x;
+
       if (t.y > GH_BASE + NPC_H){
         traffic.splice(i, 1); score++;
         scoreEl.textContent = score;
@@ -501,7 +669,10 @@ function loop(ts){
         if (score % 12 === 0) levelUp();
         continue;
       }
-      if (overlaps(chb, hbox(t.x, t.y, NPC_W, NPC_H))){
+
+      // Car–NPC collision
+      const npcDrawX = t.x + (t.dodgeOffsetX || 0);
+      if (overlaps(chb, hbox(npcDrawX, t.y, NPC_W, NPC_H))){
         spawnExplosion(carX + CAR_W/2, carDrawY + CAR_H/2);
         STATE = 'dying'; deathTimer = 520;
         sndDrive.pause();
@@ -510,18 +681,39 @@ function loop(ts){
         setTimeout(() => gc.classList.remove('shake'), 400);
         break;
       }
-      const nb = hbox(t.x, t.y, NPC_W, NPC_H);
+
+      // Car–Car near miss
+      const nb = hbox(npcDrawX, t.y, NPC_W, NPC_H);
       const exp = {l: nb.l-14, r: nb.r+14, t: nb.t, b: nb.b};
       if (overlaps(chb, exp) && !overlaps(chb, nb) && nearMissTimer <= 0){
         nearMissTimer = 60; score += 2; scoreEl.textContent = score;
-        pops.push({x: t.x + NPC_W/2, y: t.y, a: 1, t: 'CLOSE!', c: '#ffcc00'});
+        pops.push({x: npcDrawX + NPC_W/2, y: t.y, a: 1, t: 'CLOSE!', c: '#ffcc00'});
         if (S.vibrateOn && navigator.vibrate) navigator.vibrate(30);
       }
     }
     if (nearMissTimer > 0) nearMissTimer -= dt;
 
+    // ── NPC–NPC collision (push apart) ──
+    for (let i = 0; i < traffic.length; i++){
+      for (let j = i + 1; j < traffic.length; j++){
+        const a = traffic[i], b = traffic[j];
+        const ax = a.x + (a.dodgeOffsetX || 0), bx = b.x + (b.dodgeOffsetX || 0);
+        const aBox = hbox(ax, a.y, NPC_W, NPC_H);
+        const bBox = hbox(bx, b.y, NPC_W, NPC_H);
+        if (overlaps(aBox, bBox)){
+          const push = 1.5;
+          a.dodgeOffsetX = (a.dodgeOffsetX||0) + (ax < bx ? -push : push);
+          b.dodgeOffsetX = (b.dodgeOffsetX||0) + (bx < ax ? -push : push);
+          // Slow down the faster one slightly
+          if (a.spdRel > b.spdRel) a.spdRel *= 0.98;
+          else b.spdRel *= 0.98;
+        }
+      }
+    }
+
     spawnTimer += dt * 16.667;
-    const spawnInterval = Math.max(500, SPAWN_MS - (level-1)*60);
+    // Spawn interval also scales with speed — faster = more frequent
+    const spawnInterval = Math.max(300, SPAWN_MS - (level-1)*40 - (roadSpeed - BASE_SPD)*15);
     if (spawnTimer >= spawnInterval){ spawnNPC(); spawnTimer = 0; }
     updateHUD();
 
@@ -623,7 +815,9 @@ $('lb-submit-btn').addEventListener('click', async () => {
   playerName = name;
   localStorage.setItem(LB_PLAYER_KEY, name);
 
-  // Optimistic UI
+  // Bind this name to the current IP
+  await bindNameToIP(name);
+
   const optimisticEntry = { name, score, ts: Date.now(), _optimistic: true };
   const cached = lbLoadCache();
   const withNew = [...cached, optimisticEntry].sort((a,b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
@@ -638,7 +832,6 @@ $('lb-submit-btn').addEventListener('click', async () => {
     $('lb-submit-status').textContent = '✓ Saved locally (syncing…)';
   });
 
-  // Hide form forever — name is now stored
   setTimeout(() => { $('lb-entry-wrap').style.display = 'none'; }, 1200);
 });
 
@@ -672,12 +865,14 @@ if (brakeBtn){
   brakeBtn.addEventListener('pointerleave', e => { if (e.buttons > 0) brakeActive = false; });
 }
 
-/* ── HORN BUTTON (HUD) ───────────────────────────────── */
+/* ── HORN BUTTON (outside HUD, in controls area) ────── */
 $('btn-horn').addEventListener('pointerdown', e => {
   e.preventDefault();
   if (STATE !== 'playing') return;
-  showToast(hornToast, 380);
+  // No toast on horn — just play sound and trigger avoidance
   playHorn();
+  hornActive = true;
+  hornTimer = 1200;    // avoidance lasts ~1.2 seconds
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate([15, 10, 20]);
 });
 
@@ -689,7 +884,9 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowUp'){ boostActive = true; boostTimer = 1400; }
   else if (e.key === ' ') STATE === 'playing' ? pauseGame() : STATE === 'paused' ? resumeGame() : null;
   else if (e.key === 'b' || e.key === 'B'){ boostActive = true; boostTimer = 1400; }
-  else if (e.key === 'h' || e.key === 'H') playHorn();
+  else if (e.key === 'h' || e.key === 'H'){
+    playHorn(); hornActive = true; hornTimer = 1200;
+  }
 });
 document.addEventListener('keyup', e => {
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight'){ steerInput = 0; carVelX *= 0.7; }
@@ -734,6 +931,18 @@ showScreen('home');
 setHudVisible(false);
 drawSpeedometer(60);
 lbFetch();
+
+// Pre-load IP and check if this IP already has a bound name
+(async () => {
+  const ip = await fetchClientIP();
+  if (ip && !playerName) {
+    const mapped = ipNameMap[ip];
+    if (mapped) {
+      playerName = mapped;
+      localStorage.setItem(LB_PLAYER_KEY, mapped);
+    }
+  }
+})();
 
 if ('serviceWorker' in navigator)
   window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
