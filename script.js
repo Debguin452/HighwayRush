@@ -11,15 +11,26 @@ const CAR_BASE_Y_OFFSET = 18;
 const CAR_BOOST_Y_LIFT = 18;
 const BRAKE_Y_LIFT = -10;
 
+const STOREGIT_BASE = 'https://storegit.pages.dev';
+let STOREGIT_KEY = '';
+let _keyReady = null;
+function getKey(){
+  if (STOREGIT_KEY) return Promise.resolve(STOREGIT_KEY);
+  if (_keyReady) return _keyReady;
+  _keyReady = fetch('/api/config')
+    .then(r => r.json())
+    .then(d => { if (d.key) STOREGIT_KEY = d.key; return STOREGIT_KEY; })
+    .catch(() => '');
+  return _keyReady;
+}
+const LB_FILE = 'highway-rush-leaderboard.json';
+const LB_CACHE_KEY = 'hr_lb_cache';
+const LB_PLAYER_KEY = 'hr_lb_player';
+const MAX_LB_ENTRIES = 100;
+
 const DEFAULTS = {
-  soundOn: true,
-  vibrateOn: true,
-  gyroOn: false,
-  swipeOn: true,
-  boostOn: true,
-  hornOn: false,
-  sensitivity: 7,
-  nightMode: false
+  soundOn: true, vibrateOn: true, gyroOn: false,
+  swipeOn: true, boostOn: true, sensitivity: 5, nightMode: false
 };
 let S = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('hr_settings') || '{}'));
 function saveSett(){ localStorage.setItem('hr_settings', JSON.stringify(S)); }
@@ -27,25 +38,25 @@ function saveSett(){ localStorage.setItem('hr_settings', JSON.stringify(S)); }
 const $ = id => document.getElementById(id);
 const gc = $('gc');
 const ctx = gc.getContext('2d', { alpha: false });
+const speedoCanvas = $('speedo-canvas');
+const speedoCtx = speedoCanvas.getContext('2d');
 const scoreEl = $('score-val'), levelEl = $('level-val');
-const speedBar = $('speed-bar'), speedLabel = $('speed-label');
 const screenHome = $('screen-home'), screenPause = $('screen-pause');
 const screenGO = $('screen-gameover'), screenSettings = $('screen-settings');
+const screenLB = $('screen-leaderboard');
 const goScoreEl = $('go-score'), goBestEl = $('go-best'), goLevelEl = $('go-level');
 const bestEl = $('best-score'), newBestBadge = $('new-best-badge'), levelToast = $('level-up-toast');
 const hornToast = $('horn-toast'), boostToast = $('boost-toast'), gyroHint = $('gyro-hint');
 const sndCrash = $('snd-crash'), sndDrive = $('snd-drive');
 
-const HUD_H = 50, CTRL_H = 90;
+const HUD_H = 58, CTRL_H = 90;
 function sizeCanvas(){
   const availH = window.innerHeight - HUD_H - CTRL_H;
   const scale = Math.min(window.innerWidth / GW, availH / GH_BASE);
-  const cw = Math.round(GW * scale);
-  const ch = Math.round(GH_BASE * scale);
   gc.width = GW; gc.height = GH_BASE;
-  gc.style.width  = cw + 'px';
-  gc.style.height = ch + 'px';
-  gc.style.top = HUD_H + Math.max(0, (availH - ch) / 2) + 'px';
+  gc.style.width  = Math.round(GW * scale) + 'px';
+  gc.style.height = Math.round(GH_BASE * scale) + 'px';
+  gc.style.top = HUD_H + Math.max(0, (availH - Math.round(GH_BASE * scale)) / 2) + 'px';
 }
 sizeCanvas();
 window.addEventListener('resize', sizeCanvas);
@@ -58,43 +69,100 @@ let STATE = 'home';
 let score = 0, level = 1, best = +localStorage.getItem('hr_best') || 0;
 let roadSpeed = BASE_SPD, roadY = 0;
 let carX = (GW - CAR_W) / 2;
-let carVelX = 0;
-let carTilt = 0;        // current tilt angle in radians (negative = left, positive = right)
-let carTiltTarget = 0;  // target tilt angle
-let steerInput = 0;
-let gyroSteer = 0;
-let boostActive = false, boostTimer = 0;
-let brakeActive = false;
+let carVelX = 0, carTilt = 0, carTiltTarget = 0;
+let steerInput = 0, gyroSteer = 0;
+let boostActive = false, boostTimer = 0, brakeActive = false;
 let carYOffset = 0, carYOffsetTarget = 0;
 let traffic = [], particles = [], pops = [];
-let raf = null;
-let lastTime = 0, spawnTimer = 0, deathTimer = 0;
-let nearMissTimer = 0;
+let raf = null, lastTime = 0, spawnTimer = 0, deathTimer = 0, nearMissTimer = 0;
 
 bestEl.textContent = best;
 
 function steerAccel(){ return 0.38 + (S.sensitivity / 10) * 0.52; }
-const STEER_FRICTION   = 0.875;   // higher = longer glide (driftier)
-const STEER_RELEASE_FRICTION = 0.925; // even softer when no input (drift tail)
-const MAX_STEER_SPD    = 7.5;
-const MAX_TILT         = 0.28;   // max tilt (radians)
-const TILT_SPEED       = 0.2;   // how fast tilt follows velocity
-const TILT_RETURN      = 0.1;   // how fast it snaps back
+const STEER_FRICTION = 0.86, STEER_RELEASE_FRICTION = 0.90, MAX_STEER_SPD = 7.5;
+const MAX_TILT = 0.32, TILT_SPEED = 0.18, TILT_RETURN = 0.10;
 
+/* ── SPEEDOMETER ─────────────────────────────────────── */
+let speedoNeedle = 0;
+function drawSpeedometer(speedKmh){
+  const target = Math.min(speedKmh, 200);
+  speedoNeedle += (target - speedoNeedle) * 0.12;
+  const W = speedoCanvas.width, H = speedoCanvas.height;
+  const cx = W / 2, cy = H / 2 + 2, R = W / 2 - 3;
+  speedoCtx.clearRect(0, 0, W, H);
+
+  const startAng = Math.PI * 0.75;
+  const endAng   = Math.PI * 2.25;
+  const totalAng = endAng - startAng;
+
+  speedoCtx.beginPath();
+  speedoCtx.arc(cx, cy, R, startAng, endAng);
+  speedoCtx.lineWidth = 3;
+  speedoCtx.strokeStyle = 'rgba(255,255,255,0.08)';
+  speedoCtx.stroke();
+
+  const fraction = Math.min(speedoNeedle / 200, 1);
+  const color = fraction < 0.55 ? '#39ff8a' : fraction < 0.78 ? '#ff8c00' : '#ff3c3c';
+  speedoCtx.beginPath();
+  speedoCtx.arc(cx, cy, R, startAng, startAng + totalAng * fraction);
+  speedoCtx.lineWidth = 3;
+  speedoCtx.strokeStyle = color;
+  speedoCtx.stroke();
+
+  const tickCount = 8;
+  for (let i = 0; i <= tickCount; i++){
+    const a = startAng + (i / tickCount) * totalAng;
+    const inner = R - 5, outer = R + 1;
+    speedoCtx.beginPath();
+    speedoCtx.moveTo(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner);
+    speedoCtx.lineTo(cx + Math.cos(a) * outer, cy + Math.sin(a) * outer);
+    speedoCtx.lineWidth = 1;
+    speedoCtx.strokeStyle = 'rgba(255,255,255,0.3)';
+    speedoCtx.stroke();
+  }
+
+  const needleAng = startAng + totalAng * fraction;
+  speedoCtx.save();
+  speedoCtx.translate(cx, cy);
+  speedoCtx.rotate(needleAng);
+  speedoCtx.beginPath();
+  speedoCtx.moveTo(-4, 0);
+  speedoCtx.lineTo(R - 6, 0);
+  speedoCtx.lineWidth = 2;
+  speedoCtx.strokeStyle = '#fff';
+  speedoCtx.shadowColor = color;
+  speedoCtx.shadowBlur = 6;
+  speedoCtx.stroke();
+  speedoCtx.restore();
+
+  speedoCtx.beginPath();
+  speedoCtx.arc(cx, cy, 3, 0, Math.PI * 2);
+  speedoCtx.fillStyle = '#fff';
+  speedoCtx.fill();
+
+  speedoCtx.font = "bold 8px 'Orbitron',monospace";
+  speedoCtx.fillStyle = color;
+  speedoCtx.textAlign = 'center';
+  speedoCtx.fillText(Math.round(speedoNeedle), cx, cy + 13);
+  speedoCtx.textAlign = 'left';
+}
+
+/* ── SCREEN MGMT ─────────────────────────────────────── */
 function showScreen(name){
-  [screenHome, screenPause, screenGO, screenSettings].forEach(s => s.classList.remove('active'));
-  if (name === 'home')     screenHome.classList.add('active');
-  else if (name === 'pause')    screenPause.classList.add('active');
+  [screenHome, screenPause, screenGO, screenSettings, screenLB].forEach(s => s.classList.remove('active'));
+  if (name === 'home')        screenHome.classList.add('active');
+  else if (name === 'pause')  screenPause.classList.add('active');
   else if (name === 'gameover') screenGO.classList.add('active');
   else if (name === 'settings') screenSettings.classList.add('active');
+  else if (name === 'leaderboard') screenLB.classList.add('active');
 }
 function setHudVisible(v){
   const o = v ? '1' : '0';
   $('hud').style.opacity = o;
   $('controls').style.opacity = o;
-  $('speed-bar-wrap').style.opacity = o;
 }
 
+/* ── SETTINGS ────────────────────────────────────────── */
 function applySettingsUI(){
   const map = {
     'set-sound':   [S.soundOn,   v => { S.soundOn   = v; if(!v) sndDrive.pause(); else if(STATE==='playing') sndDrive.play().catch(()=>{}); }],
@@ -102,50 +170,133 @@ function applySettingsUI(){
     'set-gyro':    [S.gyroOn,    v => { S.gyroOn    = v; gyroHint.hidden = !v; if(v) requestGyroPermission(); }],
     'set-swipe':   [S.swipeOn,   v => { S.swipeOn   = v; }],
     'set-boost':   [S.boostOn,   v => { S.boostOn   = v; $('btn-boost').style.display = v ? '' : 'none'; }],
-    'set-horn':    [S.hornOn,    v => { S.hornOn    = v; $('btn-horn').style.display  = v ? '' : 'none'; }],
     'set-night':   [S.nightMode, v => { S.nightMode = v; document.body.classList.toggle('night-mode', v); }],
   };
   for (const [id, [val]] of Object.entries(map)){
-    const btn = $(id);
-    if (!btn) continue;
+    const btn = $(id); if (!btn) continue;
     btn.textContent = val ? 'ON' : 'OFF';
     btn.className = 'toggle-btn ' + (val ? 'on' : 'off');
     btn.onclick = () => {
-      const cur = map[id][0];
-      const next = !cur;
-      map[id][0] = next;
-      const key = id.replace('set-', '');
-      const sKey = {sound:'soundOn', vibrate:'vibrateOn', gyro:'gyroOn', swipe:'swipeOn', boost:'boostOn', horn:'hornOn', night:'nightMode'}[key];
+      const next = !map[id][0]; map[id][0] = next;
+      const sKey = {sound:'soundOn', vibrate:'vibrateOn', gyro:'gyroOn', swipe:'swipeOn', boost:'boostOn', night:'nightMode'}[id.replace('set-', '')];
       if (sKey) S[sKey] = next;
-      map[id][1](next);
-      saveSett();
-      applySettingsUI();
+      map[id][1](next); saveSett(); applySettingsUI();
     };
   }
   $('set-sensitivity').value = S.sensitivity;
   $('sens-val').textContent = S.sensitivity;
   $('btn-boost').style.display = S.boostOn ? '' : 'none';
-  $('btn-horn').style.display  = S.hornOn  ? '' : 'none';
   document.body.classList.toggle('night-mode', S.nightMode);
   gyroHint.hidden = !S.gyroOn;
 }
 $('set-sensitivity').addEventListener('input', e => {
-  S.sensitivity = +e.target.value;
-  $('sens-val').textContent = S.sensitivity;
-  saveSett();
+  S.sensitivity = +e.target.value; $('sens-val').textContent = S.sensitivity; saveSett();
 });
 
+/* ── LEADERBOARD (StoreGit + optimistic cache) ───────── */
+let lbData = [];
+let lbSyncing = false;
+let playerName = localStorage.getItem(LB_PLAYER_KEY) || '';
+
+async function lbRequest(method, path, body){
+  const k = await getKey();
+  return fetch(`${STOREGIT_BASE}/api/${path}`, {
+    method,
+    headers: Object.assign({'X-API-Key': k}, body ? {'Content-Type': 'application/json'} : {}),
+    body: body ? JSON.stringify(body) : undefined
+  }).then(async r => {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    return d;
+  });
+}
+
+function lbLoadCache(){
+  try { return JSON.parse(localStorage.getItem(LB_CACHE_KEY) || '[]'); } catch { return []; }
+}
+function lbSaveCache(data){ localStorage.setItem(LB_CACHE_KEY, JSON.stringify(data)); }
+
+async function lbFetch(){
+  try {
+    const k = await getKey();
+    const text = await fetch(
+      `${STOREGIT_BASE}/api/download?name=${encodeURIComponent(LB_FILE)}`,
+      { headers: {'X-API-Key': k} }
+    ).then(r => { if (!r.ok) throw new Error(r.status); return r.text(); });
+    const parsed = JSON.parse(text);
+    lbData = Array.isArray(parsed) ? parsed : [];
+    lbSaveCache(lbData);
+  } catch {
+    lbData = lbLoadCache();
+  }
+  return lbData;
+}
+
+async function lbPush(name, scoreVal){
+  const entry = { name: name.trim().slice(0, 16), score: scoreVal, ts: Date.now() };
+  const existing = lbLoadCache();
+  const merged = [...existing, entry]
+    .sort((a, b) => b.score - a.score)
+    .reduce((acc, e) => {
+      if (!acc.find(x => x.name.toLowerCase() === e.name.toLowerCase())) acc.push(e);
+      return acc;
+    }, [])
+    .slice(0, MAX_LB_ENTRIES);
+  lbSaveCache(merged);
+  lbData = merged;
+
+  const content = btoa(unescape(encodeURIComponent(JSON.stringify(merged))));
+  try {
+    const files = await lbRequest('GET', 'files');
+    const existing_file = Array.isArray(files) ? files.find(f => f.name === LB_FILE || f.originalName === LB_FILE) : null;
+    if (existing_file){
+      await lbRequest('POST', 'upload', { name: LB_FILE, content, sha: existing_file.sha });
+    } else {
+      await lbRequest('POST', 'upload', { name: LB_FILE, content });
+    }
+  } catch (e) {
+    console.warn('LB push failed (will retry on next submit):', e.message);
+  }
+}
+
+function renderLB(data, myName){
+  const el = $('lb-list');
+  if (!data || !data.length){
+    el.innerHTML = '<div class="lb-loading">No entries yet — be first!</div>';
+    return;
+  }
+  const me = myName ? myName.trim().toLowerCase() : '';
+  el.innerHTML = data.slice(0, 50).map((e, i) => {
+    const rankCls = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
+    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}`;
+    const isMe = me && e.name.trim().toLowerCase() === me;
+    return `<div class="lb-row${e._optimistic ? ' optimistic' : ''}${isMe ? ' me' : ''}">
+      <span class="lb-rank ${rankCls}">${medal}</span>
+      <span class="lb-name">${e.name}</span>
+      <span class="lb-score">${e.score}</span>
+    </div>`;
+  }).join('');
+}
+
+async function openLeaderboard(){
+  showScreen('leaderboard');
+  $('lb-list').innerHTML = '<div class="lb-loading">Loading…</div>';
+  const cached = lbLoadCache();
+  if (cached.length) renderLB(cached, playerName);
+  const fresh = await lbFetch();
+  renderLB(fresh, playerName);
+}
+
+/* ── GAME LIFECYCLE ──────────────────────────────────── */
 function startGame(){
   traffic = []; particles = []; pops = [];
   score = 0; level = 1; roadSpeed = BASE_SPD;
   carX = (GW - CAR_W) / 2; carVelX = 0; steerInput = 0; gyroSteer = 0;
-  carYOffset = 0; carYOffsetTarget = 0;
-  carTilt = 0; carTiltTarget = 0;
+  carYOffset = 0; carYOffsetTarget = 0; carTilt = 0; carTiltTarget = 0;
   roadY = 0; lastTime = 0; spawnTimer = 0; deathTimer = 0;
   boostActive = false; boostTimer = 0; brakeActive = false; nearMissTimer = 0;
+  speedoNeedle = 60;
   scoreEl.textContent = '0'; levelEl.textContent = '1';
-  speedBar.style.setProperty('--spd', '0%');
-  speedLabel.textContent = '60';
   STATE = 'playing';
   showScreen(null);
   setHudVisible(true);
@@ -153,19 +304,14 @@ function startGame(){
   if (raf) cancelAnimationFrame(raf);
   raf = requestAnimationFrame(loop);
 }
-
 function pauseGame(){
   if (STATE !== 'playing') return;
-  STATE = 'paused';
-  showScreen('pause');
-  sndDrive.pause();
+  STATE = 'paused'; showScreen('pause'); sndDrive.pause();
   if (raf){ cancelAnimationFrame(raf); raf = null; }
 }
 function resumeGame(){
   if (STATE !== 'paused') return;
-  STATE = 'playing';
-  showScreen(null);
-  lastTime = 0;
+  STATE = 'playing'; showScreen(null); lastTime = 0;
   if (S.soundOn) sndDrive.play().catch(() => {});
   raf = requestAnimationFrame(loop);
 }
@@ -178,42 +324,36 @@ function doGameOver(){
   goBestEl.textContent  = best;
   goLevelEl.textContent = level;
   newBestBadge.hidden   = !isNew;
+  $('lb-name-input').value = playerName;
+  $('lb-submit-status').textContent = '';
   setHudVisible(false);
   showScreen('gameover');
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate([80, 40, 80]);
+  lbFetch();
 }
 function goHome(){
-  STATE = 'home';
-  sndDrive.pause();
+  STATE = 'home'; sndDrive.pause();
   if (raf){ cancelAnimationFrame(raf); raf = null; }
   traffic = []; particles = []; pops = [];
-  setHudVisible(false);
-  showScreen('home');
+  setHudVisible(false); showScreen('home');
 }
 
+/* ── EFFECTS ─────────────────────────────────────────── */
 function spawnExplosion(x, y){
   for (let i = 0; i < 26; i++){
-    const a = Math.random() * Math.PI * 2;
-    const s = 1.5 + Math.random() * 5;
+    const a = Math.random() * Math.PI * 2, s = 1.5 + Math.random() * 5;
     particles.push({x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s - 2.5, life: 1, r: 2 + Math.random()*5, c: Math.random() < 0.5 ? '#ff3c3c' : '#ff8c00'});
   }
 }
 function showToast(el, dur = 1000){
-  el.hidden = false;
-  el.classList.add('show');
-  setTimeout(() => {
-    el.classList.remove('show');
-    setTimeout(() => { el.hidden = true; }, 250);
-  }, dur);
+  el.hidden = false; el.classList.add('show');
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => { el.hidden = true; }, 250); }, dur);
 }
-
 function levelUp(){
-  level++;
-  roadSpeed += 0.45;
-  levelEl.textContent = level;
-  showToast(levelToast, 400);
+  level++; roadSpeed += 0.45; levelEl.textContent = level; showToast(levelToast, 400);
 }
 
+/* ── SPAWN ───────────────────────────────────────────── */
 function spawnNPC(){
   const lane = Math.floor(Math.random() * LANE_X.length);
   if (traffic.some(t => t.lane === lane && t.y < SAFE_GAP)) return;
@@ -221,39 +361,49 @@ function spawnNPC(){
   traffic.push({ lane, x: LANE_X[lane] - NPC_W/2, y: -NPC_H, spd, imgIdx: Math.floor(Math.random() * npcImgs.length) });
   if (level >= 2 && Math.random() < 0.20){
     const lane2 = (lane + 1 + Math.floor(Math.random() * 2)) % LANE_X.length;
-    if (!traffic.some(t => t.lane === lane2 && t.y < SAFE_GAP)){
+    if (!traffic.some(t => t.lane === lane2 && t.y < SAFE_GAP))
       traffic.push({ lane: lane2, x: LANE_X[lane2] - NPC_W/2, y: -NPC_H - 30, spd: spd + Math.random() * 0.5, imgIdx: Math.floor(Math.random() * npcImgs.length) });
-    }
   }
 }
 
+/* ── COLLISION ───────────────────────────────────────── */
 function hbox(x, y, w, h){ return {l: x+HITPAD, r: x+w-HITPAD, t: y+HITPAD, b: y+h-HITPAD}; }
 function overlaps(a, b){ return !(a.b < b.t || a.t > b.b || a.r < b.l || a.l > b.r); }
-
 function lerp(a, b, t){ return a + (b - a) * t; }
 
+/* ── DRAW ────────────────────────────────────────────── */
 function draw(){
   const rh = roadImg.naturalHeight || 600;
   if (rh > 1){
     const off = ((roadY % rh) + rh) % rh;
-    for (let y = off - rh; y < GH_BASE; y += rh){
-      ctx.drawImage(roadImg, 0, y, GW, rh);
-    }
+    for (let y = off - rh; y < GH_BASE; y += rh) ctx.drawImage(roadImg, 0, y, GW, rh);
   } else {
-    ctx.fillStyle = '#1a1a1f';
-    ctx.fillRect(0, 0, GW, GH_BASE);
+    ctx.fillStyle = '#1a1a1f'; ctx.fillRect(0, 0, GW, GH_BASE);
   }
 
   traffic.forEach(t => ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, t.x, t.y, NPC_W, NPC_H));
 
   const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
 
-  // Draw car with tilt rotation
-  if (Math.abs(carTilt) > 0.005) {
+  if (boostActive){
     ctx.save();
-    ctx.translate(carX + CAR_W / 2, carDrawY + CAR_H * 0.55);
+    ctx.globalAlpha = 0.25 + Math.random() * 0.1;
+    ctx.fillStyle = '#ff8c00';
+    ctx.beginPath();
+    ctx.ellipse(carX + CAR_W/2, carDrawY + CAR_H + 2, CAR_W/2 + 3, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+    for (let i = 1; i <= 3; i++){
+      ctx.globalAlpha = 0.15 / i;
+      ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY + i * 5, CAR_W, CAR_H);
+    }
+    ctx.restore();
+  }
+
+  if (Math.abs(carTilt) > 0.005){
+    ctx.save();
+    ctx.translate(carX + CAR_W/2, carDrawY + CAR_H * 0.55);
     ctx.rotate(carTilt);
-    ctx.drawImage(carImg, 0, 0, 120, 120, -CAR_W / 2, -CAR_H * 0.55, CAR_W, CAR_H);
+    ctx.drawImage(carImg, 0, 0, 120, 120, -CAR_W/2, -CAR_H*0.55, CAR_W, CAR_H);
     ctx.restore();
   } else {
     ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY, CAR_W, CAR_H);
@@ -261,83 +411,55 @@ function draw(){
 
   if (particles.length){
     particles.forEach(p => {
-      ctx.globalAlpha = p.life;
-      ctx.fillStyle = p.c;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, Math.max(0.1, p.r * p.life), 0, Math.PI * 2);
-      ctx.fill();
+      ctx.globalAlpha = p.life; ctx.fillStyle = p.c;
+      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(0.1, p.r * p.life), 0, Math.PI*2); ctx.fill();
     });
     ctx.globalAlpha = 1;
   }
 
   if (pops.length){
-    ctx.font = "bold 13px 'Orbitron',monospace";
-    ctx.textAlign = 'center';
-    pops.forEach(p => {
-      ctx.globalAlpha = p.a;
-      ctx.fillStyle = p.c || '#ffffff';
-      ctx.fillText(p.t || '+1', p.x, p.y);
-    });
-    ctx.globalAlpha = 1;
-    ctx.textAlign = 'left';
+    ctx.font = "bold 13px 'Orbitron',monospace"; ctx.textAlign = 'center';
+    pops.forEach(p => { ctx.globalAlpha = p.a; ctx.fillStyle = p.c||'#fff'; ctx.fillText(p.t||'+1', p.x, p.y); });
+    ctx.globalAlpha = 1; ctx.textAlign = 'left';
   }
 }
 
+/* ── HUD UPDATE ──────────────────────────────────────── */
 function updateHUD(){
   const pct = Math.min(100, (roadSpeed - BASE_SPD) / (BASE_SPD * 1.5) * 100);
-  speedBar.style.setProperty('--spd', pct + '%');
-  speedLabel.textContent = Math.round(60 + pct * 1.4);
+  const kmh = Math.round(60 + pct * 1.4);
+  drawSpeedometer(kmh);
   if (S.soundOn) sndDrive.playbackRate = 0.9 + pct / 100 * 0.55;
 }
 
+/* ── MAIN LOOP ───────────────────────────────────────── */
 function loop(ts){
   if (STATE !== 'playing' && STATE !== 'dying') return;
-  const rawDt = lastTime ? (ts - lastTime) / 16.667 : 1;
-  const dt = Math.min(rawDt, 2.5);
+  const dt = Math.min(lastTime ? (ts - lastTime) / 16.667 : 1, 2.5);
   lastTime = ts;
 
   if (STATE === 'playing'){
     roadY += roadSpeed * dt;
+    const eff = steerInput !== 0 ? steerInput : (S.gyroOn ? gyroSteer : 0);
 
-    let eff = steerInput !== 0 ? steerInput : (S.gyroOn ? gyroSteer : 0);
+    if (boostActive){ boostTimer -= dt * 16.667; if (boostTimer <= 0) boostActive = false; }
 
-    if (boostActive){
-      boostTimer -= dt * 16.667;
-      if (boostTimer <= 0){ boostActive = false; }
-    }
+    if (boostActive)       roadSpeed = Math.min(BASE_SPD * 2, roadSpeed + 0.05 * dt);
+    else if (brakeActive)  roadSpeed = Math.max(BASE_SPD * 0.35, roadSpeed - 0.22 * dt);
+    else                   roadSpeed = lerp(roadSpeed, BASE_SPD + (level-1)*0.55, 0.012*dt);
 
-    const boostMult = boostActive ? 1.9 : 1;
-    const brakeMult = brakeActive ? 0.0 : 1;
-
-    if (boostActive){
-      roadSpeed = Math.min(BASE_SPD * 2, roadSpeed + 0.05 * dt);
-    } else if (brakeActive){
-      roadSpeed = Math.max(BASE_SPD * 0.35, roadSpeed - 0.22 * dt);
-    } else {
-      roadSpeed = lerp(roadSpeed, BASE_SPD + (level - 1) * 0.55, 0.012 * dt);
-    }
-
-    if (boostActive){
-      carYOffsetTarget = CAR_BOOST_Y_LIFT;
-    } else if (brakeActive){
-      carYOffsetTarget = BRAKE_Y_LIFT;
-    } else {
-      carYOffsetTarget = 0;
-    }
+    carYOffsetTarget = boostActive ? CAR_BOOST_Y_LIFT : brakeActive ? BRAKE_Y_LIFT : 0;
     carYOffset = lerp(carYOffset, carYOffsetTarget, 0.12 * dt);
 
-    const isHoldingSteer = steerInput !== 0 || (S.gyroOn && Math.abs(gyroSteer) > 0.05);
-    const friction = isHoldingSteer ? Math.pow(STEER_FRICTION, dt) : Math.pow(STEER_RELEASE_FRICTION, dt);
-
-    carVelX += eff * steerAccel() * boostMult * brakeMult * dt;
-    carVelX *= friction;
+    const isHolding = steerInput !== 0 || (S.gyroOn && Math.abs(gyroSteer) > 0.05);
+    const fric = isHolding ? Math.pow(STEER_FRICTION, dt) : Math.pow(STEER_RELEASE_FRICTION, dt);
+    carVelX += eff * steerAccel() * (boostActive ? 1.9 : 1) * (brakeActive ? 0 : 1) * dt;
+    carVelX *= fric;
     carVelX = Math.max(-MAX_STEER_SPD, Math.min(MAX_STEER_SPD, carVelX));
     carX = Math.max(0, Math.min(GW - CAR_W, carX + carVelX * dt));
 
-    // Tilt: lean into turns proportional to lateral velocity
     carTiltTarget = (carVelX / MAX_STEER_SPD) * MAX_TILT;
-    const tiltRate = isHoldingSteer ? TILT_SPEED : TILT_RETURN;
-    carTilt = lerp(carTilt, carTiltTarget, tiltRate * dt);
+    carTilt = lerp(carTilt, carTiltTarget, (isHolding ? TILT_SPEED : TILT_RETURN) * dt);
 
     const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
     const chb = hbox(carX, carDrawY, CAR_W, CAR_H);
@@ -346,8 +468,7 @@ function loop(ts){
       const t = traffic[i];
       t.y += (t.spd + 2) * dt;
       if (t.y > GH_BASE + NPC_H){
-        traffic.splice(i, 1);
-        score++;
+        traffic.splice(i, 1); score++;
         scoreEl.textContent = score;
         pops.push({x: t.x + NPC_W/2, y: GH_BASE - 50, a: 1, t: '+1', c: '#fff'});
         if (score % 12 === 0) levelUp();
@@ -365,9 +486,7 @@ function loop(ts){
       const nb = hbox(t.x, t.y, NPC_W, NPC_H);
       const exp = {l: nb.l-14, r: nb.r+14, t: nb.t, b: nb.b};
       if (overlaps(chb, exp) && !overlaps(chb, nb) && nearMissTimer <= 0){
-        nearMissTimer = 60;
-        score+=2;
-        scoreEl.textContent = score;
+        nearMissTimer = 60; score += 2; scoreEl.textContent = score;
         pops.push({x: t.x + NPC_W/2, y: t.y, a: 1, t: 'CLOSE!', c: '#ffcc00'});
         if (S.vibrateOn && navigator.vibrate) navigator.vibrate(30);
       }
@@ -375,7 +494,7 @@ function loop(ts){
     if (nearMissTimer > 0) nearMissTimer -= dt;
 
     spawnTimer += dt * 16.667;
-    const spawnInterval = Math.max(500, SPAWN_MS - (level - 1) * 60);
+    const spawnInterval = Math.max(500, SPAWN_MS - (level-1)*60);
     if (spawnTimer >= spawnInterval){ spawnNPC(); spawnTimer = 0; }
     updateHUD();
 
@@ -386,8 +505,7 @@ function loop(ts){
 
   for (let i = particles.length - 1; i >= 0; i--){
     const p = particles[i];
-    p.x += p.vx * dt; p.y += p.vy * dt;
-    p.vy += 0.15 * dt; p.life -= 0.035 * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 0.15 * dt; p.life -= 0.035 * dt;
     if (p.life <= 0) particles.splice(i, 1);
   }
   for (let i = pops.length - 1; i >= 0; i--){
@@ -399,35 +517,111 @@ function loop(ts){
   raf = requestAnimationFrame(loop);
 }
 
+/* ── REALISTIC HORN (Web Audio API) ─────────────────── */
+let hornAudioCtx = null;
+function getAudioCtx(){
+  if (!hornAudioCtx || hornAudioCtx.state === 'closed')
+    hornAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (hornAudioCtx.state === 'suspended') hornAudioCtx.resume();
+  return hornAudioCtx;
+}
+
+function playHorn(){
+  if (!S.soundOn) return;
+  try {
+    const ac = getAudioCtx();
+    const now = ac.currentTime;
+
+    const masterGain = ac.createGain();
+    masterGain.gain.setValueAtTime(0, now);
+    masterGain.gain.linearRampToValueAtTime(0.35, now + 0.03);
+    masterGain.gain.setValueAtTime(0.35, now + 0.22);
+    masterGain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+    masterGain.connect(ac.destination);
+
+    const freqs = [415, 523, 622];
+    freqs.forEach(freq => {
+      const osc = ac.createOscillator();
+      const g = ac.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq * 0.97, now);
+      osc.frequency.linearRampToValueAtTime(freq, now + 0.04);
+      g.gain.setValueAtTime(0.4, now);
+      osc.connect(g); g.connect(masterGain);
+      osc.start(now); osc.stop(now + 0.45);
+    });
+
+    const noise = ac.createOscillator();
+    const noiseGain = ac.createGain();
+    noise.type = 'square';
+    noise.frequency.setValueAtTime(80, now);
+    noiseGain.gain.setValueAtTime(0.06, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    noise.connect(noiseGain); noiseGain.connect(masterGain);
+    noise.start(now); noise.stop(now + 0.12);
+
+    const bpf = ac.createBiquadFilter();
+    bpf.type = 'bandpass';
+    bpf.frequency.setValueAtTime(900, now);
+    bpf.Q.value = 0.8;
+    masterGain.connect(bpf);
+
+  } catch (e2) {}
+}
+
+/* ── BUTTON EVENTS ───────────────────────────────────── */
 $('play-btn').addEventListener('click', startGame);
 $('pause-btn').addEventListener('click', pauseGame);
 $('resume-btn').addEventListener('click', resumeGame);
 $('retry-btn').addEventListener('click', startGame);
 $('home-from-pause').addEventListener('click', goHome);
 $('home-from-go').addEventListener('click', goHome);
+$('lb-open-btn').addEventListener('click', openLeaderboard);
+$('lb-close-btn').addEventListener('click', () => showScreen('home'));
 
 function openSettings(prev){
-  applySettingsUI();
-  screenSettings.dataset.prev = prev || 'home';
-  showScreen('settings');
+  applySettingsUI(); screenSettings.dataset.prev = prev || 'home'; showScreen('settings');
 }
 $('settings-open-btn').addEventListener('click', () => openSettings('home'));
 $('settings-pause-btn').addEventListener('click', () => { pauseGame(); openSettings('pause'); });
 $('settings-close-btn').addEventListener('click', () => {
   const prev = screenSettings.dataset.prev || 'home';
-  if (prev === 'pause') showScreen('pause');
-  else goHome();
+  if (prev === 'pause') showScreen('pause'); else goHome();
 });
 
+/* ── LEADERBOARD SUBMIT ──────────────────────────────── */
+$('lb-submit-btn').addEventListener('click', async () => {
+  const name = $('lb-name-input').value.trim();
+  if (!name){ $('lb-submit-status').textContent = 'Enter your name!'; return; }
+  playerName = name;
+  localStorage.setItem(LB_PLAYER_KEY, name);
+
+  const optimisticEntry = { name, score, ts: Date.now(), _optimistic: true };
+  const cached = lbLoadCache();
+  const withNew = [...cached, optimisticEntry].sort((a,b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
+  lbSaveCache(withNew);
+
+  $('lb-submit-status').textContent = '✓ Submitted!';
+  $('lb-submit-btn').disabled = true;
+
+  lbPush(name, score).then(() => {
+    $('lb-submit-status').textContent = '✓ Saved to leaderboard!';
+  }).catch(() => {
+    $('lb-submit-status').textContent = '✓ Saved locally (syncing…)';
+  });
+});
+
+/* ── STEER BUTTONS ───────────────────────────────────── */
 $('btn-left').addEventListener('pointerdown',  e => { e.preventDefault(); steerInput = -1; });
 $('btn-right').addEventListener('pointerdown', e => { e.preventDefault(); steerInput =  1; });
 $('btn-left').addEventListener('pointerup',    e => { e.preventDefault(); steerInput = 0; carVelX *= 0.7; });
 $('btn-right').addEventListener('pointerup',   e => { e.preventDefault(); steerInput = 0; carVelX *= 0.7; });
 $('btn-left').addEventListener('pointerleave', e => { if (e.buttons > 0){ steerInput = 0; carVelX *= 0.7; }});
 $('btn-right').addEventListener('pointerleave',e => { if (e.buttons > 0){ steerInput = 0; carVelX *= 0.7; }});
-document.addEventListener('pointerup',     () => { steerInput = 0; brakeActive = false; });
+document.addEventListener('pointerup', () => { steerInput = 0; brakeActive = false; });
 document.addEventListener('pointercancel', () => { steerInput = 0; carVelX = 0; brakeActive = false; });
 
+/* ── BOOST ───────────────────────────────────────────── */
 $('btn-boost').addEventListener('pointerdown', e => {
   e.preventDefault();
   if (STATE !== 'playing') return;
@@ -435,54 +629,43 @@ $('btn-boost').addEventListener('pointerdown', e => {
   showToast(boostToast, 400);
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate(40);
 });
-$('btn-boost').addEventListener('pointerup', e => { e.preventDefault(); });
+$('btn-boost').addEventListener('pointerup', e => e.preventDefault());
 
+/* ── BRAKE ───────────────────────────────────────────── */
 const brakeBtn = $('btn-brake');
 if (brakeBtn){
   brakeBtn.addEventListener('pointerdown', e => {
-    e.preventDefault();
-    if (STATE !== 'playing') return;
-    brakeActive = true;
+    e.preventDefault(); if (STATE !== 'playing') return; brakeActive = true;
   });
   brakeBtn.addEventListener('pointerup',    e => { e.preventDefault(); brakeActive = false; });
   brakeBtn.addEventListener('pointerleave', e => { if (e.buttons > 0) brakeActive = false; });
 }
 
+/* ── HORN BUTTON (HUD) ───────────────────────────────── */
 $('btn-horn').addEventListener('pointerdown', e => {
   e.preventDefault();
   if (STATE !== 'playing') return;
-  showToast(hornToast, 400);
-  if (S.soundOn){
-    try {
-      const ctx2 = new (window.AudioContext || window.webkitAudioContext)();
-      const osc = ctx2.createOscillator();
-      const gain = ctx2.createGain();
-      osc.connect(gain); gain.connect(ctx2.destination);
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(320, ctx2.currentTime);
-      osc.frequency.linearRampToValueAtTime(280, ctx2.currentTime + 0.15);
-      gain.gain.setValueAtTime(0.22, ctx2.currentTime);
-      gain.gain.linearRampToValueAtTime(0, ctx2.currentTime + 0.25);
-      osc.start(ctx2.currentTime);
-      osc.stop(ctx2.currentTime + 0.28);
-    } catch(e2){}
-  }
-  if (S.vibrateOn && navigator.vibrate) navigator.vibrate(20);
+  showToast(hornToast, 380);
+  playHorn();
+  if (S.vibrateOn && navigator.vibrate) navigator.vibrate([15, 10, 20]);
 });
 
+/* ── KEYBOARD ────────────────────────────────────────── */
 document.addEventListener('keydown', e => {
-  if (e.key === 'ArrowLeft')  steerInput = -1;
+  if (e.key === 'ArrowLeft')       steerInput = -1;
   else if (e.key === 'ArrowRight') steerInput = 1;
-  else if (e.key === 'ArrowDown') brakeActive = true;
+  else if (e.key === 'ArrowDown')  brakeActive = true;
   else if (e.key === 'ArrowUp'){ boostActive = true; boostTimer = 1400; }
   else if (e.key === ' ') STATE === 'playing' ? pauseGame() : STATE === 'paused' ? resumeGame() : null;
   else if (e.key === 'b' || e.key === 'B'){ boostActive = true; boostTimer = 1400; }
+  else if (e.key === 'h' || e.key === 'H') playHorn();
 });
 document.addEventListener('keyup', e => {
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight'){ steerInput = 0; carVelX *= 0.7; }
   if (e.key === 'ArrowDown') brakeActive = false;
 });
 
+/* ── SWIPE ───────────────────────────────────────────── */
 let swipeX = null, swipeStartX = null;
 gc.addEventListener('touchstart', e => {
   if (S.swipeOn){ swipeX = e.touches[0].clientX; swipeStartX = swipeX; }
@@ -490,37 +673,36 @@ gc.addEventListener('touchstart', e => {
 gc.addEventListener('touchmove', e => {
   if (!S.swipeOn || swipeX === null) return;
   const dx = e.touches[0].clientX - swipeX;
-  const totalDx = e.touches[0].clientX - swipeStartX;
-  if (Math.abs(totalDx) > 6){
+  if (Math.abs(e.touches[0].clientX - swipeStartX) > 6){
     steerInput = dx > 0 ? 1 : -1;
-    const strength = Math.min(Math.abs(dx) / 18, 1);
-    carVelX += (dx > 0 ? 1 : -1) * strength * steerAccel() * 0.6;
+    carVelX += (dx > 0 ? 1 : -1) * Math.min(Math.abs(dx)/18, 1) * steerAccel() * 0.6;
   }
   swipeX = e.touches[0].clientX;
 }, {passive: true});
 gc.addEventListener('touchend', () => { steerInput = 0; swipeX = null; carVelX *= 0.75; }, {passive: true});
 
+/* ── GYRO ────────────────────────────────────────────── */
 function requestGyroPermission(){
   if (typeof DeviceOrientationEvent !== 'undefined' &&
-      typeof DeviceOrientationEvent.requestPermission === 'function'){
+      typeof DeviceOrientationEvent.requestPermission === 'function')
     DeviceOrientationEvent.requestPermission().catch(() => {});
-  }
 }
 window.addEventListener('deviceorientation', e => {
   if (!S.gyroOn || STATE !== 'playing' || e.gamma === null) return;
-  const dead = 5 - S.sensitivity * 0.3;
-  const g = e.gamma;
-  gyroSteer = Math.abs(g) < dead ? 0 : Math.max(-1, Math.min(1, (g - Math.sign(g) * dead) / 18));
+  const dead = 5 - S.sensitivity * 0.3, g = e.gamma;
+  gyroSteer = Math.abs(g) < dead ? 0 : Math.max(-1, Math.min(1, (g - Math.sign(g)*dead) / 18));
 });
 
 document.addEventListener('contextmenu', e => e.preventDefault());
 document.addEventListener('gesturestart', e => e.preventDefault());
 document.addEventListener('gesturechange', e => e.preventDefault());
 
+/* ── INIT ────────────────────────────────────────────── */
 applySettingsUI();
 showScreen('home');
 setHudVisible(false);
+drawSpeedometer(60);
+lbFetch();
 
-if ('serviceWorker' in navigator){
+if ('serviceWorker' in navigator)
   window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
-}

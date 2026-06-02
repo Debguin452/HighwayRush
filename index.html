@@ -17,6 +17,7 @@
 <div id="app">
   <canvas id="gc"></canvas>
 
+  <!-- HUD: score | pause | speedo+horn | level -->
   <div id="hud">
     <div id="hud-left">
       <div class="hud-label">SCORE</div>
@@ -25,22 +26,22 @@
     <div id="hud-center">
       <button id="pause-btn" aria-label="Pause">⏸</button>
     </div>
+    <div id="hud-speedo">
+      <canvas id="speedo-canvas" width="54" height="54"></canvas>
+    </div>
+    <div id="hud-horn">
+      <button id="btn-horn" aria-label="Horn">📯</button>
+    </div>
     <div id="hud-right">
       <div class="hud-label">LEVEL</div>
       <div id="level-val">1</div>
     </div>
   </div>
 
-  <div id="speed-bar-wrap">
-    <div id="speed-bar"></div>
-    <div id="speed-label">60</div>
-  </div>
-
-  <!-- Bottom controls: left | [horn] [boost] [brake] | right -->
+  <!-- Bottom controls: left | [boost] [brake] | right -->
   <div id="controls">
     <button id="btn-left" aria-label="Left">◀</button>
     <div id="mid-btns">
-      <button id="btn-horn" aria-label="Horn">📯</button>
       <button id="btn-boost" aria-label="Boost">⚡</button>
       <button id="btn-brake" aria-label="Brake">🛑</button>
     </div>
@@ -53,8 +54,8 @@
       <div id="logo">HIGHWAY<span>RUSH</span></div>
       <div id="best-display"><span class="lbl">BEST</span><span id="best-score">0</span></div>
       <button class="big-btn" id="play-btn">PLAY</button>
+      <button class="small-btn" id="lb-open-btn">🏆 LEADERBOARD</button>
       <button class="small-btn" id="settings-open-btn">⚙ SETTINGS</button>
-      <button class="small-btn" id="sound-btn">🔊 SOUND ON</button>
     </div>
     <div id="road-preview"></div>
   </div>
@@ -79,8 +80,25 @@
         <div class="go-stat"><span class="lbl">LEVEL</span><span id="go-level">1</span></div>
       </div>
       <div id="new-best-badge" hidden>🏆 NEW BEST!</div>
+      <!-- name entry -->
+      <div id="lb-entry-wrap">
+        <input id="lb-name-input" type="text" maxlength="16" placeholder="Your name…" autocomplete="off" spellcheck="false">
+        <button class="big-btn" id="lb-submit-btn">SUBMIT SCORE</button>
+        <div id="lb-submit-status"></div>
+      </div>
       <button class="big-btn" id="retry-btn">RETRY</button>
       <button class="small-btn" id="home-from-go">HOME</button>
+    </div>
+  </div>
+
+  <!-- LEADERBOARD SCREEN -->
+  <div id="screen-leaderboard" class="screen">
+    <div class="screen-inner">
+      <div class="overlay-title" style="font-size:26px;letter-spacing:3px;">🏆 TOP DRIVERS</div>
+      <div id="lb-list-wrap">
+        <div id="lb-list"><div class="lb-loading">Loading…</div></div>
+      </div>
+      <button class="big-btn" id="lb-close-btn">CLOSE</button>
     </div>
   </div>
 
@@ -109,10 +127,6 @@
         <button class="toggle-btn" id="set-boost">ON</button>
       </div>
       <div class="setting-row">
-        <span class="setting-label">📯 Horn Button</span>
-        <button class="toggle-btn" id="set-horn">ON</button>
-      </div>
-      <div class="setting-row">
         <span class="setting-label">🎮 Sensitivity</span>
         <div class="slider-wrap">
           <input type="range" id="set-sensitivity" min="1" max="10" value="5">
@@ -128,7 +142,7 @@
   </div>
 
   <div id="level-up-toast" hidden>LEVEL UP!</div>
-  <div id="horn-toast" hidden>HONK!</div>
+  <div id="horn-toast" hidden>📯 HONK!</div>
   <div id="boost-toast" hidden>BOOST!</div>
   <div id="gyro-hint" hidden>Tilt to steer</div>
 </div>
