@@ -5,8 +5,8 @@ const LANE_X = [22, 63, 104, 145, 186, 227, 275, 322, 350];
 const NPC_IMGS = ['./images/traffic.png','./images/traffic2.png','./images/traffic3.png','./images/traffic4.png'];
 const CAR_W = 48, CAR_H = 70, NPC_W = 46, NPC_H = 68;
 const SAFE_GAP = 160, HITPAD = 10;
-const BASE_SPD = 5.5;          
-const SPAWN_MS = 600;         
+const BASE_SPD = 5.5;           // reduced base speed
+const SPAWN_MS = 600;         // slower spawn rate
 const CAR_BASE_Y_OFFSET = 18;
 const CAR_BOOST_Y_LIFT = 18;
 const BRAKE_Y_LIFT = -10;
@@ -28,7 +28,7 @@ function getKey(){
   return _keyReady;
 }
 const LB_FILE = 'highway-rush-leaderboard.json';
-const LB_TOP_FILE = 'highway-rush-top-scores.json'; // separate file for all players' top scores
+
 const LB_CACHE_KEY = 'hr_lb_cache';
 const LB_PLAYER_KEY = 'hr_lb_player';
 const LB_IP_KEY = 'hr_lb_ip';          // stores ip→name binding
@@ -429,10 +429,15 @@ async function doGameOver(){
 
   if (playerName){
     entryWrap.style.display = 'none';
-    const stored = lbLoadCache();
-    const myEntry = stored.find(e => e.name.toLowerCase() === playerName.toLowerCase());
+    await lbFetch();
+    const myEntry = lbData.find(e => e.name.toLowerCase() === playerName.toLowerCase());
     if (!myEntry || score > myEntry.score){
       statusEl.textContent = '✓ Score submitted!';
+      const optimistic={name:playerName,score,ts:Date.now()};
+      lbData=lbData.filter(e=>e.name.toLowerCase()!==playerName.toLowerCase());
+      lbData.push(optimistic);
+      lbData.sort((a,b)=>b.score-a.score);
+      renderLB(lbData, playerName);
       lbPush(playerName, score).catch(() => {});
     } else {
       statusEl.textContent = '';
@@ -475,8 +480,8 @@ function getHornDodgeFactor(npcX, npcY, carDrawY){
   const dx = Math.abs((npcX + NPC_W/2) - (carX + CAR_W/2));
   const dy = carDrawY - (npcY + NPC_H/2);        // positive = NPC is above (ahead)
   const dist = Math.sqrt(dx*dx + dy*dy);
-  const maxDist = 200;                            // avoidance radius
-  if (dist > maxDist || dy < -40) return 0;       // far away or behind = no effect
+  const maxDist = 172;                            // avoidance radius
+  if (dist > maxDist || dy < -10) return 0;       // far away or behind = no effect
   return Math.max(0, 1 - dist / maxDist);
 }
 
@@ -650,11 +655,11 @@ function loop(ts){
           const carCenterX = carX + CAR_W/2;
           const npcCenterX = t.x + (t.dodgeOffsetX||0) + NPC_W/2;
           const dir = npcCenterX > carCenterX ? 1 : -1;      // dodge away from player
-          t.dodgeVelX = lerp(t.dodgeVelX || 0, dir * dodge * 4 * (roadSpeed / BASE_SPD), 0.25 * dt);
+          t.dodgeVelX = lerp(t.dodgeVelX || 0, dir * dodge * 4 * (roadSpeed / BASE_SPD), 0.06 * dt);
         }
       } else {
         // Gradually return to lane when horn stops
-        t.dodgeVelX = lerp(t.dodgeVelX || 0, 0, 0.1 * dt);
+        t.dodgeVelX = lerp(t.dodgeVelX || 0, 0, 0.05 * dt);
       }
       t.dodgeOffsetX = (t.dodgeOffsetX || 0) + (t.dodgeVelX || 0) * dt;
       // Clamp dodge so NPC stays on road
