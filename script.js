@@ -5,7 +5,7 @@ const LANE_X = [22, 63, 104, 145, 186, 227, 275, 322, 350];
 const NPC_IMGS = ['./images/traffic.png','./images/traffic2.png','./images/traffic3.png','./images/traffic4.png'];
 const CAR_W = 48, CAR_H = 70, NPC_W = 46, NPC_H = 68;
 const SAFE_GAP = 160, HITPAD = 10;
-const BASE_SPD = 5.5;
+const BASE_SPD = 7;
 const SPAWN_MS = 500;
 const CAR_BASE_Y_OFFSET = 18;
 const CAR_BOOST_Y_LIFT = 18;
@@ -78,9 +78,9 @@ let raf = null, lastTime = 0, spawnTimer = 0, deathTimer = 0, nearMissTimer = 0;
 
 bestEl.textContent = best;
 
-function steerAccel(){ return 0.38 + (S.sensitivity / 10) * 0.52; }
-const STEER_FRICTION = 0.86, STEER_RELEASE_FRICTION = 0.90, MAX_STEER_SPD = 7.5;
-const MAX_TILT = 0.32, TILT_SPEED = 0.18, TILT_RETURN = 0.10;
+function steerAccel(){ return 0.55 + (S.sensitivity / 10) * 0.65; }
+const STEER_FRICTION = 0.80, STEER_RELEASE_FRICTION = 0.85, MAX_STEER_SPD = 9;
+const MAX_TILT = 0.28, TILT_SPEED = 0.22, TILT_RETURN = 0.12;
 
 /* ── SPEEDOMETER ─────────────────────────────────────── */
 let speedoNeedle = 0;
@@ -380,13 +380,14 @@ function levelUp(){
 function spawnNPC(){
   const lane = Math.floor(Math.random() * LANE_X.length);
   if (traffic.some(t => t.lane === lane && t.y < SAFE_GAP)) return;
-  const spdRel = -0.6 + Math.random() * 1.95; // relative to roadSpeed
-  traffic.push({ lane, x: LANE_X[lane] - NPC_W/2, y: -NPC_H, spd: roadSpeed + spdRel, spdRel, imgIdx: Math.floor(Math.random() * npcImgs.length) });
+  // spdRel: how much faster the NPC scrolls down vs road. Always positive so they approach player.
+  const spdRel = 1.5 + Math.random() * 3.0;
+  traffic.push({ lane, x: LANE_X[lane] - NPC_W/2, y: -NPC_H, spdRel, imgIdx: Math.floor(Math.random() * npcImgs.length) });
   if (level >= 2 && Math.random() < 0.20){
     const lane2 = (lane + 1 + Math.floor(Math.random() * 2)) % LANE_X.length;
-    const spdRel2 = spdRel + Math.random() * 0.5;
+    const spdRel2 = 1.5 + Math.random() * 3.0;
     if (!traffic.some(t => t.lane === lane2 && t.y < SAFE_GAP))
-      traffic.push({ lane: lane2, x: LANE_X[lane2] - NPC_W/2, y: -NPC_H - 30, spd: roadSpeed + spdRel2, spdRel: spdRel2, imgIdx: Math.floor(Math.random() * npcImgs.length) });
+      traffic.push({ lane: lane2, x: LANE_X[lane2] - NPC_W/2, y: -NPC_H - 30, spdRel: spdRel2, imgIdx: Math.floor(Math.random() * npcImgs.length) });
   }
 }
 
@@ -445,10 +446,10 @@ function draw(){
 
 /* ── HUD UPDATE ──────────────────────────────────────── */
 function updateHUD(){
-  const pct = Math.min(100, (roadSpeed - BASE_SPD) / (BASE_SPD * 1.5) * 100);
-  const kmh = Math.round(60 + pct * 1.4);
+  const pct = Math.min(100, (roadSpeed - BASE_SPD) / (BASE_SPD * 1.8) * 100);
+  const kmh = Math.round(80 + pct * 1.8);
   drawSpeedometer(kmh);
-  if (S.soundOn) sndDrive.playbackRate = 0.9 + pct / 100 * 0.55;
+  if (S.soundOn) sndDrive.playbackRate = 0.85 + pct / 100 * 0.65;
 }
 
 /* ── MAIN LOOP ───────────────────────────────────────── */
@@ -489,7 +490,9 @@ function loop(ts){
 
     for (let i = traffic.length - 1; i >= 0; i--){
       const t = traffic[i];
-      // NPC moves at roadSpeed + its own relative offset (so they mirror road scroll)
+      // Road scrolls down at roadSpeed. NPC is a real car going slower than player,
+      // so from player's frame it drifts DOWN. spdRel is the extra drift speed.
+      // When roadSpeed changes (boost/brake), NPCs automatically adapt.
       t.y += (roadSpeed + t.spdRel) * dt;
       if (t.y > GH_BASE + NPC_H){
         traffic.splice(i, 1); score++;
