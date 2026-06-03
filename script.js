@@ -5,7 +5,7 @@ const LANE_X = [22, 63, 104, 145, 186, 227, 275, 322, 350];
 const NPC_IMGS = ['./images/traffic.png','./images/traffic2.png','./images/traffic3.png','./images/traffic4.png'];
 const CAR_W = 48, CAR_H = 70, NPC_W = 46, NPC_H = 68;
 const SAFE_GAP = 160, HITPAD = 10;
-const BASE_SPD = 5.5;           // reduced base speed
+const BASE_SPD = 5;           // reduced base speed
 const SPAWN_MS = 600;         // slower spawn rate
 const CAR_BASE_Y_OFFSET = 18;
 const CAR_BOOST_Y_LIFT = 18;
@@ -364,6 +364,23 @@ function syncBestFromRemote(){
   }
 }
 
+// Restore hr_best by player NAME alone — used after the player re-enters their
+// name (e.g. after clearing site data). Falls back to name match so they always
+// recover their score even if their IP has changed (new network, VPN, mobile).
+function syncBestFromRemoteByName(name){
+  if (!name || !lbData.length) return;
+  const key = name.trim().toLowerCase();
+  // Prefer IP match; fall back to name match only
+  const entry = (clientIP && lbData.find(e => e.ip === clientIP))
+    || lbData.find(e => e.name.trim().toLowerCase() === key);
+  if (!entry) return;
+  if (entry.score > best){
+    best = entry.score;
+    localStorage.setItem('hr_best', best);
+    bestEl.textContent = best;
+  }
+}
+
 // Upload a file to StoreGit
 async function uploadFile(fileName, data){
   const content = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
@@ -492,7 +509,7 @@ function startGame(){
 }
 function pauseGame(){
   if (STATE !== 'playing') return;
-  STATE = 'paused'; showScreen('pause'); stopEngine(); stopScreech();
+  STATE = 'paused'; showScreen('pause'); stopEngine();
   if (raf){ cancelAnimationFrame(raf); raf = null; }
 }
 function resumeGame(){
@@ -592,7 +609,7 @@ async function doGameOver(){
   }
 }
 function goHome(){
-  STATE = 'home'; stopEngine(); stopScreech();
+  STATE = 'home'; stopEngine();
   if (raf){ cancelAnimationFrame(raf); raf = null; }
   traffic = []; particles = []; pops = [];
   setHudVisible(false); showScreen('home');
@@ -610,7 +627,7 @@ function showToast(el, dur = 1000){
   setTimeout(() => { el.classList.remove('show'); setTimeout(() => { el.hidden = true; }, 250); }, dur);
 }
 function levelUp(){
-  level++; roadSpeed += 0.3; levelEl.textContent = level; showToast(levelToast, 400);
+  level++; roadSpeed += 0.25; levelEl.textContent = level; showToast(levelToast, 400);
 }
 
 /* ── NPC AVOIDANCE ON HORN ───────────────────────────── */
@@ -620,7 +637,7 @@ function getHornDodgeFactor(npcX, npcY, carDrawY){
   const dx = Math.abs((npcX + NPC_W/2) - (carX + CAR_W/2));
   const dy = carDrawY - (npcY + NPC_H/2);        // positive = NPC is above (ahead)
   const dist = Math.sqrt(dx*dx + dy*dy);
-  const maxDist = 200;                            // avoidance radius
+  const maxDist = 150;                            // avoidance radius
   if (dist > maxDist || dy < -40) return 0;       // far away or behind = no effect
   return Math.max(0, 1 - dist / maxDist);
 }
@@ -629,17 +646,22 @@ function getHornDodgeFactor(npcX, npcY, carDrawY){
 function spawnNPC(){
   const lane = Math.floor(Math.random() * LANE_X.length);
   if (traffic.some(t => t.lane === lane && t.y < SAFE_GAP)) return;
-  // NPC speed now scales with roadSpeed so they stay relevant at all levels
-  const baseRel = 0.8 + Math.random() * 1.2;     // reduced relative speed
-  const spdRel = baseRel * (roadSpeed / BASE_SPD);
+  // NPC speed: an absolute component so they always look fast, plus a relative
+  // component that scales up with level. At launch roadSpeed is near 0 so we
+  // use Math.max to ensure a floor — NPCs are never "parked".
+  const absFloor = BASE_SPD * 0.5;                       // always at least this fast
+  const relBonus = 0.6 + Math.random() * 1.0;            // extra variation
+  const effectiveRoad = Math.max(BASE_SPD, roadSpeed);   // treat road as full speed for NPC calc
+  const spdRel = relBonus * (effectiveRoad / BASE_SPD);
+  const spdAbs = Math.max(absFloor, spdRel);             // absolute floor
   traffic.push({
     lane, x: LANE_X[lane] - NPC_W/2, y: -NPC_H,
-    spdRel, imgIdx: Math.floor(Math.random() * npcImgs.length),
+    spdRel: spdAbs, imgIdx: Math.floor(Math.random() * npcImgs.length),
     dodgeVelX: 0, dodgeOffsetX: 0                // for horn avoidance
   });
   if (level >= 2 && Math.random() < 0.20){
     const lane2 = (lane + 1 + Math.floor(Math.random() * 2)) % LANE_X.length;
-    const spdRel2 = (0.8 + Math.random() * 1.2) * (roadSpeed / BASE_SPD);
+    const spdRel2 = Math.max(absFloor, (0.6 + Math.random() * 1.0) * (effectiveRoad / BASE_SPD));
     if (!traffic.some(t => t.lane === lane2 && t.y < SAFE_GAP))
       traffic.push({
         lane: lane2, x: LANE_X[lane2] - NPC_W/2, y: -NPC_H - 30,
@@ -759,16 +781,12 @@ function loop(ts){
                         brakeActive ? cruiseSpeed * 0.35 :
                         cruiseSpeed;
     // Slow ramp at very low speeds (launch feel), faster lerp once up to speed
-    const speedLerp = boostActive ? 0.05 * dt :
+    const speedLerp = boostActive ? 0.01 * dt :
                       brakeActive ? 0.08 * dt :
-                      roadSpeed < BASE_SPD * 0.5 ? 0.004 * dt :  // slow launch
+                      roadSpeed < BASE_SPD * 0.5 ? 0.01 * dt :  // slow launch
                       roadSpeed < BASE_SPD        ? 0.008 * dt :  // mid ramp
                       0.012 * dt;
     roadSpeed = lerp(roadSpeed, targetSpeed, speedLerp);
-
-    // Tyre screech during braking (only at meaningful speed)
-    const pctNow = Math.min(100, (roadSpeed / (BASE_SPD * 2.8)) * 100);
-    if (brakeActive && pctNow > 20) startScreech(); else stopScreech();
 
     carYOffsetTarget = boostActive ? CAR_BOOST_Y_LIFT : brakeActive ? BRAKE_Y_LIFT : 0;
     carYOffset = lerp(carYOffset, carYOffsetTarget, 0.12 * dt);
@@ -785,7 +803,7 @@ function loop(ts){
       if (Math.abs(carVelX) > 3){          // only crash on fast impact
         spawnExplosion(carX + CAR_W/2, GH_BASE - CAR_H - CAR_BASE_Y_OFFSET);
         STATE = 'dying'; deathTimer = 520;
-        stopEngine(); stopScreech();
+        stopEngine();
         playCrash();
         gc.classList.add('shake');
         setTimeout(() => gc.classList.remove('shake'), 400);
@@ -803,8 +821,12 @@ function loop(ts){
     // ── NPC update ──
     for (let i = traffic.length - 1; i >= 0; i--){
       const t = traffic[i];
-      // NPC speed scaled proportionally to roadSpeed
-      t.y += (roadSpeed + t.spdRel) * dt;
+      // NPC moves at its own absolute speed (spdRel already has a floor baked in
+      // from spawnNPC) PLUS the road scroll so they feel embedded in the world.
+      // We use Math.max so that even at game-start when roadSpeed ≈ 0 the NPC
+      // visually moves at a meaningful pace (floor = BASE_SPD * 1.0).
+      const npcMove = Math.max(BASE_SPD*0.5, roadSpeed) + t.spdRel;
+      t.y += npcMove * dt;
 
       // Horn avoidance — nearer NPCs dodge with gentle acceleration and visible tilt
       if (hornActive){
@@ -813,16 +835,15 @@ function loop(ts){
           const carCenterX = carX + CAR_W/2;
           const npcCenterX = t.x + (t.dodgeOffsetX||0) + NPC_W/2;
           const dir = npcCenterX > carCenterX ? 1 : -1;
-          // Gentle acceleration (was 0.06, now 0.022) — less snappy, more natural
-          t.dodgeVelX = lerp(t.dodgeVelX || 0, dir * dodge * 2.8 * (roadSpeed / BASE_SPD), 0.022 * dt);
+          t.dodgeVelX = lerp(t.dodgeVelX || 0, dir * dodge * 2.8 * (roadSpeed / BASE_SPD), 0.045 * dt);
         }
       } else {
         // Slower return-to-lane (was 0.025, now 0.010) — car eases back gradually
-        t.dodgeVelX = lerp(t.dodgeVelX || 0, 0, 0.010 * dt);
+        t.dodgeVelX = lerp(t.dodgeVelX || 0, 0, 0.01 * dt);
       }
       t.dodgeOffsetX = (t.dodgeOffsetX || 0) + (t.dodgeVelX || 0) * dt;
       // NPC tilt proportional to dodge velocity — looks like the car is actually swerving
-      const MAX_NPC_TILT = 0.18;
+      const MAX_NPC_TILT = -0.18;
       t.dodgeTilt = lerp(t.dodgeTilt || 0, (t.dodgeVelX || 0) / (2.8 * 1.5) * MAX_NPC_TILT, 0.08 * dt);
       // Clamp dodge so NPC stays on road
       const rawX = t.x + t.dodgeOffsetX;
@@ -842,7 +863,7 @@ function loop(ts){
       if (overlaps(chb, hbox(npcDrawX, t.y, NPC_W, NPC_H))){
         spawnExplosion(carX + CAR_W/2, carDrawY + CAR_H/2);
         STATE = 'dying'; deathTimer = 520;
-        stopEngine(); stopScreech();
+        stopEngine();
         playCrash();
         gc.classList.add('shake');
         setTimeout(() => gc.classList.remove('shake'), 400);
@@ -922,15 +943,21 @@ function getAudioCtx(){
 }
 
 // ── RPM constants ──
-const RPM_IDLE   = 700;
-const RPM_CRUISE = 3200;
-const RPM_MAX    = 6800;
+const RPM_IDLE   = 800;
+const RPM_CRUISE = 3000;
+const RPM_MAX    = 6500;
 function speedToRPM(spd, isBoost, isBrake){
-  if (isBrake) return Math.max(RPM_IDLE, _currentRPM * 0.6);
-  const base = RPM_IDLE + (spd / (BASE_SPD * 2.8)) * (RPM_CRUISE - RPM_IDLE);
-  return isBoost ? Math.min(RPM_MAX, base * 1.9) : Math.min(RPM_MAX, base);
+  if (isBrake){
+    // On brake: RPM drops toward a slightly raised idle (engine braking feel)
+    return Math.max(RPM_IDLE + 300, _currentRPM * 0.55);
+  }
+  // Map road speed to RPM range — use a gentle curve so low speeds
+  // don't produce an annoying buzz (idle is barely audible)
+  const frac = Math.min(1, spd / (BASE_SPD * 2.5));
+  const base  = RPM_IDLE + frac * (RPM_CRUISE - RPM_IDLE);
+  return isBoost ? Math.min(RPM_MAX, base * 1.85) : Math.min(RPM_MAX, base);
 }
-function rpmToRate(rpm){ return Math.max(0.3, rpm / 2000); }
+function rpmToRate(rpm){ return Math.max(0.25, rpm / 2200); }
 function rpmToHz(rpm) { return (rpm / 60) * 2; }  // 4-cyl: 2 firing events/rev
 
 // ── Engine state ──
@@ -970,55 +997,63 @@ function startEngine(){
   const now = ac.currentTime;
   _currentRPM = RPM_IDLE;
 
-  // ── Output chain (all layers feed into this) ──
+  // ── Output chain ──
   const masterGain = ac.createGain();
+  // Start near-silent and ramp up — prevents harsh click on game start
   masterGain.gain.setValueAtTime(0.001, now);
-  masterGain.gain.linearRampToValueAtTime(0.72, now + 1.4);  // soft start fade-in
+  masterGain.gain.linearRampToValueAtTime(0.58, now + 2.2);  // gentler, slower fade-in
 
   const boostGain = ac.createGain();
   boostGain.gain.value = 1;
 
   const comp = ac.createDynamicsCompressor();
-  comp.threshold.value = -16;
-  comp.knee.value      = 10;
-  comp.ratio.value     = 5;
-  comp.attack.value    = 0.004;
-  comp.release.value   = 0.20;
+  comp.threshold.value = -18;
+  comp.knee.value      = 12;
+  comp.ratio.value     = 4;
+  comp.attack.value    = 0.006;
+  comp.release.value   = 0.25;
 
+  // Two-stage filter: gentle low-pass keeps it warm, high-pass cuts sub-rumble
   const lp = ac.createBiquadFilter();
-  lp.type = 'lowpass'; lp.frequency.value = 2800; lp.Q.value = 0.7;
+  lp.type = 'lowpass'; lp.frequency.value = 2400; lp.Q.value = 0.6;
 
+  const hp = ac.createBiquadFilter();
+  hp.type = 'highpass'; hp.frequency.value = 55; hp.Q.value = 0.5;
+
+  // Milder waveshaper — less electronic buzz, more mechanical warmth
   const waveshaper = ac.createWaveShaper();
-  waveshaper.curve      = makeDistortionCurve(55);
-  waveshaper.oversample = '4x';
+  waveshaper.curve      = makeDistortionCurve(30);  // was 55 — softer saturation
+  waveshaper.oversample = '2x';
 
+  hp.connect(waveshaper);
   waveshaper.connect(lp);
   lp.connect(comp);
   comp.connect(boostGain);
   boostGain.connect(masterGain);
   masterGain.connect(ac.destination);
 
-  // ── Layer A: engine.mp3 pitch-shifted by RPM ──
+  // ── Layer A: engine.wav pitch-shifted by RPM ──
   let src = null;
   if (engineBuffer){
     const srcGain = ac.createGain();
-    srcGain.gain.value = 0.70;
+    srcGain.gain.value = 0.80;
     src = ac.createBufferSource();
     src.buffer = engineBuffer;
     src.loop   = true;
     src.playbackRate.value = rpmToRate(RPM_IDLE);
     src.connect(srcGain);
-    srcGain.connect(waveshaper);
+    srcGain.connect(hp);
     src.start(now);
   }
 
-  // ── Layer B: synthesised harmonic stack (4-cyl model) ──
+  // ── Layer B: synthesised harmonic stack ──
+  // Quieter amplitudes at idle — the engine.wav carries the low end;
+  // synth just adds top-end character and helps when the file isn't loaded.
   const harmonicDefs = [
-    { mult: 1,   amp: 0.36, type: 'sawtooth' },  // fundamental — piston stroke
-    { mult: 2,   amp: 0.20, type: 'sawtooth' },  // 2nd harmonic
-    { mult: 3,   amp: 0.09, type: 'square'   },  // 3rd — adds growl
-    { mult: 4,   amp: 0.05, type: 'sawtooth' },  // 4th
-    { mult: 0.5, amp: 0.08, type: 'sine'     },  // sub — exhaust rumble
+    { mult: 1,   amp: 0.22, type: 'sawtooth' },  // fundamental
+    { mult: 2,   amp: 0.12, type: 'sawtooth' },  // 2nd harmonic
+    { mult: 3,   amp: 0.05, type: 'square'   },  // 3rd — gentle growl
+    { mult: 0.5, amp: 0.10, type: 'sine'     },  // sub — exhaust thump
   ];
   const baseHz    = rpmToHz(RPM_IDLE);
   const synthNodes = harmonicDefs.map(def => {
@@ -1026,13 +1061,14 @@ function startEngine(){
     const g   = ac.createGain();
     osc.type            = def.type;
     osc.frequency.value = baseHz * def.mult;
-    g.gain.value        = def.amp;
-    osc.connect(g); g.connect(waveshaper);
+    // Start synth near-silent at idle so it doesn't buzz annoyingly
+    g.gain.value = def.amp * 0.15;
+    osc.connect(g); g.connect(hp);
     osc.start(now);
     return { osc, g, mult: def.mult, baseAmp: def.amp };
   });
 
-  eng = { src, synthNodes, lp, comp, boostGain, masterGain };
+  eng = { src, synthNodes, lp, hp, comp, boostGain, masterGain };
 }
 
 function stopEngine(){
@@ -1118,51 +1154,6 @@ function _playTurboHiss(){
     src.start(now); src.stop(now + 0.9);
   } catch {}
 }
-
-
-// ── Tyre screech (synthesised — no extra file needed) ──
-let screeching = false;
-let screechNodes = null;
-function startScreech(){
-  if (!S.soundOn || screeching) return;
-  screeching = true;
-  try {
-    const ac = getAudioCtx();
-    const now = ac.currentTime;
-    // White noise via script processor (or buffer trick)
-    const bufSize = ac.sampleRate * 2;
-    const buf = ac.createBuffer(1, bufSize, ac.sampleRate);
-    const data = buf.getChannelData(0);
-    for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
-    const src = ac.createBufferSource();
-    src.buffer = buf; src.loop = true;
-
-    // Band-pass to make it sound like tyre rubber
-    const bpf = ac.createBiquadFilter();
-    bpf.type = 'bandpass'; bpf.frequency.value = 800; bpf.Q.value = 0.4;
-
-    const g = ac.createGain();
-    g.gain.setValueAtTime(0, now);
-    g.gain.linearRampToValueAtTime(0.28, now + 0.12);
-
-    src.connect(bpf); bpf.connect(g); g.connect(ac.destination);
-    src.start();
-    screechNodes = { src, g };
-  } catch {}
-}
-function stopScreech(){
-  if (!screeching || !screechNodes) return;
-  screeching = false;
-  try {
-    const ac = getAudioCtx();
-    const now = ac.currentTime;
-    screechNodes.g.gain.linearRampToValueAtTime(0, now + 0.18);
-    const s = screechNodes.src;
-    setTimeout(() => { try { s.stop(); } catch {} }, 250);
-  } catch {}
-  screechNodes = null;
-}
-
 // ── Near-miss whoosh (synthesised) ──
 function playWhoosh(){
   if (!S.soundOn) return;
@@ -1292,6 +1283,11 @@ $('lb-submit-btn').addEventListener('click', async () => {
   // Bind this name to the current IP
   await bindNameToIP(name);
 
+  // After binding, check if this name already has a higher score on the
+  // leaderboard (covers the "cleared site cache" scenario where the player
+  // re-enters their name and their IP may have changed).
+  syncBestFromRemoteByName(name);
+
   // Build optimistic list immediately so player sees their rank right away
   const nameKey = name.toLowerCase();
   const base = lbData.length ? lbData : lbLoadCache();
@@ -1335,10 +1331,10 @@ document.addEventListener('pointercancel', () => { steerInput = 0; carVelX = 0; 
 $('btn-boost').addEventListener('pointerdown', e => {
   e.preventDefault();
   if (STATE !== 'playing') return;
-  boostActive = true; boostTimer = 1400;
+  boostActive = true; boostTimer = 2000;
   playBoostSurge();
   showToast(boostToast, 400);
-  if (S.vibrateOn && navigator.vibrate) navigator.vibrate(40);
+  if (S.vibrateOn && navigator.vibrate) navigator.vibrate(60);
 });
 $('btn-boost').addEventListener('pointerup', e => e.preventDefault());
 
