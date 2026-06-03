@@ -307,6 +307,11 @@ async function lbFetch(){
     ).then(r => { if (!r.ok) throw new Error(r.status); return r.text(); });
     const parsed = JSON.parse(text);
     lbData = Array.isArray(parsed) ? parsed : [];
+    // ── Protect local player's best against stale remote data ──
+    // If we know the player's name and their local best is higher than what
+    // the remote returned (e.g. upload is in-flight or hasn't propagated yet),
+    // merge the local best into lbData so their entry is never erased.
+    lbData = mergeLocalBestIntoData(lbData);
     lbSaveCache(lbData);
   } catch {
     lbData = lbLoadCache();
@@ -320,27 +325,35 @@ async function lbFetch(){
   return lbData;
 }
 
-// ── Single source of truth for best score ────────────
-// Call this whenever best might have changed. Keeps hr_best, bestEl (home),
-// and goBestEl (game-over screen) all in sync with each other.
-function setBest(val){
-  if (val <= best) return;   // never go backwards
-  best = val;
-  localStorage.setItem('hr_best', best);
-  bestEl.textContent = best;
-  goBestEl.textContent = best;
+// Merge the local player's known best into a leaderboard dataset.
+// Ensures that if the remote hasn't received the latest upload yet (or is
+// stale), the player's own entry is never silently removed or downgraded.
+function mergeLocalBestIntoData(data){
+  if (!playerName) return data;
+  const nameKey = playerName.trim().toLowerCase();
+  const localBest = best || +localStorage.getItem('hr_best') || 0;
+  if (!localBest) return data;
+  const existing = data.find(e => e.name.trim().toLowerCase() === nameKey);
+  if (existing && existing.score >= localBest) return data; // remote already has best or better
+  // Remote is missing or outdated — upsert with the local best
+  const filtered = data.filter(e => e.name.trim().toLowerCase() !== nameKey);
+  const upserted = { name: playerName.trim().slice(0, 16), score: localBest, ts: existing ? existing.ts : Date.now() };
+  return [...filtered, upserted].sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
 }
 
 // Restore hr_best from the remote leaderboard for this device's player.
 // Runs silently after every lbFetch so same-IP devices always show
 // the correct high score even if localStorage was cleared.
 function syncBestFromRemote(){
-  if (!lbData.length) return;
-  if (!playerName) return;
+  if (!playerName || !lbData.length) return;
   const key = playerName.trim().toLowerCase();
   const entry = lbData.find(e => e.name.trim().toLowerCase() === key);
   if (!entry) return;
-  setBest(entry.score);
+  if (entry.score > best){
+    best = entry.score;
+    localStorage.setItem('hr_best', best);
+    bestEl.textContent = best;
+  }
 }
 
 // Upload a file to StoreGit
@@ -376,7 +389,11 @@ async function lbPush(name, scoreVal){
   lbData = merged;
 
   // Keep local hr_best in sync too
-  setBest(finalScore);
+  if (finalScore > best){
+    best = finalScore;
+    localStorage.setItem('hr_best', best);
+    bestEl.textContent = best;
+  }
 
   try {
     await uploadFile(LB_FILE, merged);
@@ -466,12 +483,13 @@ function resumeGame(){
 }
 async function doGameOver(){
   STATE = 'gameover';
-  // Update best immediately if this run is a new local high
-  if (score > best) setBest(score);
+  const isNew = score > best;
+  if (isNew){ best = score; localStorage.setItem('hr_best', best); }
+  bestEl.textContent = best;
   goScoreEl.textContent = score;
   goBestEl.textContent  = best;
   goLevelEl.textContent = level;
-  newBestBadge.hidden   = !(score >= best && score > 0);
+  newBestBadge.hidden   = !isNew;
   setHudVisible(false);
   showScreen('gameover');
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate([80, 40, 80]);
@@ -487,52 +505,63 @@ async function doGameOver(){
   }
 
   if (playerName){
+    // Player is known — hide name entry, fetch live LB, push score in background
     entryWrap.style.display = 'none';
-    const nameKey = playerName.toLowerCase();
 
-    // ── Step 1: inject optimistic entry into cache RIGHT NOW ──
-    // Use max(current score, existing cached score) so the leaderboard
-    // and home-screen best always agree and never go backwards.
+    // Show cached leaderboard immediately with optimistic entry
+    const nameKey = playerName.toLowerCase();
     const cached = lbLoadCache();
     const cachedEntry = cached.find(e => e.name.toLowerCase() === nameKey);
-    const displayScore = Math.max(score, cachedEntry ? cachedEntry.score : 0, best);
-    // Always re-inject so lbData reflects the latest state instantly
-    const optimistic = { name: playerName, score: displayScore, ts: Date.now(), _optimistic: true };
-    lbData = [...cached.filter(e => e.name.toLowerCase() !== nameKey), optimistic]
-      .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
-    lbSaveCache(lbData);
-    // Keep best score display in sync with what we just put in the leaderboard
-    setBest(displayScore);
-    goBestEl.textContent = best;
+    const shouldUpdate = !cachedEntry || score > cachedEntry.score;
+
+    if (shouldUpdate){
+      // Insert optimistic entry right away so player sees their position immediately
+      const optimistic = { name: playerName, score, ts: Date.now(), _optimistic: true };
+      const optimisticList = [...cached.filter(e => e.name.toLowerCase() !== nameKey), optimistic]
+        .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
+      lbSaveCache(optimisticList);
+      lbData = optimisticList;
+    } else {
+      lbData = cached;
+    }
 
     const rankInfo = renderLB(lbData, playerName);
-    if (rankInfo) statusEl.textContent = 'Rank #' + rankInfo.rank + ' \u2014 ' + rankInfo.score.toLocaleString() + ' pts';
+    if (rankInfo){
+      statusEl.textContent = 'Rank #' + rankInfo.rank + ' \u2014 ' + rankInfo.score.toLocaleString() + ' pts';
+    }
 
-    // ── Step 2: fetch live LB + push in background ──
+    // Fetch live data and push in background — update display when done
     lbFetch().then(() => {
-      // lbFetch calls syncBestFromRemote internally — best is already reconciled
       const liveEntry = lbData.find(e => e.name.toLowerCase() === nameKey);
-      const finalScore = Math.max(score, liveEntry ? liveEntry.score : 0, best);
-      // Push the true max score to remote
-      lbPush(playerName, finalScore).then(() => {
-        lbData = lbData.map(e => e._optimistic ? { name: e.name, score: e.score, ts: e.ts } : e);
+      const reallyUpdate = !liveEntry || score > liveEntry.score;
+      if (reallyUpdate){
+        // Re-insert with live data as base (lbData is now fresh from lbFetch)
+        const optimistic2 = { name: playerName, score, ts: Date.now(), _optimistic: true };
+        lbData = [...lbData.filter(e => e.name.toLowerCase() !== nameKey), optimistic2]
+          .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
         lbSaveCache(lbData);
-        setBest(finalScore);
-        goBestEl.textContent = best;
+        lbPush(playerName, score).then(() => {
+          // Remove _optimistic flag after confirmed push
+          lbData = lbData.map(e => e._optimistic ? { name: e.name, score: e.score, ts: e.ts } : e);
+          lbSaveCache(lbData);
+          const ri = renderLB(lbData, playerName);
+          if (ri) statusEl.textContent = 'Rank #' + ri.rank + ' \u2014 ' + ri.score.toLocaleString() + ' pts \u2713';
+        }).catch(() => {});
+      } else {
+        // Remote is up-to-date and has equal or better score; mergeLocalBestIntoData
+        // (already called inside lbFetch) ensures our entry wasn't erased.
         const ri = renderLB(lbData, playerName);
-        if (ri) statusEl.textContent = 'Rank #' + ri.rank + ' \u2014 ' + ri.score.toLocaleString() + ' pts \u2713';
-      }).catch(() => {
-        const ri = renderLB(lbData, playerName);
-        if (ri) statusEl.textContent = 'Rank #' + ri.rank + ' \u2014 ' + ri.score.toLocaleString() + ' pts (syncing\u2026)';
-      });
+        if (ri) statusEl.textContent = 'Rank #' + ri.rank + ' \u2014 ' + ri.score.toLocaleString() + ' pts';
+      }
     }).catch(() => {});
 
   } else {
-    // New player — show name entry form, pre-load LB in background
+    // New player — show name entry form
     entryWrap.style.display = '';
     $('lb-name-input').value = '';
     statusEl.textContent = '';
     $('lb-submit-btn').disabled = false;
+    // Pre-load leaderboard in background so it's ready
     lbFetch().catch(() => {});
   }
 }
@@ -919,31 +948,30 @@ $('lb-submit-btn').addEventListener('click', async () => {
   localStorage.setItem(LB_PLAYER_KEY, name);
   $('lb-submit-btn').disabled = true;
 
+  // Bind this name to the current IP
   await bindNameToIP(name);
 
+  // Build optimistic list immediately so player sees their rank right away
   const nameKey = name.toLowerCase();
   const base = lbData.length ? lbData : lbLoadCache();
-  const existingEntry = base.find(e => e.name.toLowerCase() === nameKey);
-  // Use max of current score and any existing entry — never downgrade
-  const displayScore = Math.max(score, existingEntry ? existingEntry.score : 0, best);
-  setBest(displayScore);
-  goBestEl.textContent = best;
-
-  const optimisticEntry = { name, score: displayScore, ts: Date.now(), _optimistic: true };
-  lbData = [...base.filter(e => e.name.toLowerCase() !== nameKey), optimisticEntry]
+  const optimisticEntry = { name, score, ts: Date.now(), _optimistic: true };
+  const withNew = [...base.filter(e => e.name.toLowerCase() !== nameKey), optimisticEntry]
     .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
-  lbSaveCache(lbData);
+  lbSaveCache(withNew);
+  lbData = withNew;
 
   const rankInfo = renderLB(lbData, playerName);
-  $('lb-submit-status').textContent = rankInfo
-    ? 'Rank #' + rankInfo.rank + ' \u2014 ' + rankInfo.score.toLocaleString() + ' pts'
-    : '\u2713 Submitted!';
+  if (rankInfo){
+    $('lb-submit-status').textContent = 'Rank #' + rankInfo.rank + ' \u2014 ' + rankInfo.score.toLocaleString() + ' pts';
+  } else {
+    $('lb-submit-status').textContent = '\u2713 Submitted!';
+  }
   $('lb-entry-wrap').style.display = 'none';
 
-  lbPush(name, displayScore).then(() => {
+  // Push to server in background; update status when confirmed
+  lbPush(name, score).then(() => {
     lbData = lbData.map(e => e._optimistic ? { name: e.name, score: e.score, ts: e.ts } : e);
     lbSaveCache(lbData);
-    setBest(displayScore);
     const ri = renderLB(lbData, playerName);
     if (ri) $('lb-submit-status').textContent = 'Rank #' + ri.rank + ' \u2014 ' + ri.score.toLocaleString() + ' pts \u2713';
   }).catch(() => {
