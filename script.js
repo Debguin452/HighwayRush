@@ -53,7 +53,6 @@ const screenLB = $('screen-leaderboard');
 const goScoreEl = $('go-score'), goBestEl = $('go-best'), goLevelEl = $('go-level');
 const bestEl = $('best-score'), newBestBadge = $('new-best-badge'), levelToast = $('level-up-toast');
 const boostToast = $('boost-toast'), gyroHint = $('gyro-hint');
-const sndCrash = $('snd-crash'), sndDrive = $('snd-drive');
 
 const HUD_H = 58, CTRL_H = 90;
 function sizeCanvas(){
@@ -174,7 +173,7 @@ function setHudVisible(v){
 /* ── SETTINGS ────────────────────────────────────────── */
 function applySettingsUI(){
   const map = {
-    'set-sound':   [S.soundOn,   v => { S.soundOn   = v; if(!v) sndDrive.pause(); else if(STATE==='playing') sndDrive.play().catch(()=>{}); }],
+    'set-sound':   [S.soundOn,   v => { S.soundOn   = v; if(!v){ stopEngine(); stopScreech(); } else if(STATE==='playing') startEngine(); }],
     'set-vibrate': [S.vibrateOn, v => { S.vibrateOn = v; }],
     'set-gyro':    [S.gyroOn,    v => { S.gyroOn    = v; gyroHint.hidden = !v; if(v) requestGyroPermission(); }],
     'set-swipe':   [S.swipeOn,   v => { S.swipeOn   = v; }],
@@ -476,7 +475,7 @@ async function openLeaderboard(){
 /* ── GAME LIFECYCLE ──────────────────────────────────── */
 function startGame(){
   traffic = []; particles = []; pops = [];
-  score = 0; level = 1; roadSpeed = BASE_SPD;
+  score = 0; level = 1; roadSpeed = 0;
   carX = (GW - CAR_W) / 2; carVelX = 0; steerInput = 0; gyroSteer = 0;
   carYOffset = 0; carYOffsetTarget = 0; carTilt = 0; carTiltTarget = 0;
   roadY = 0; lastTime = 0; spawnTimer = 0; deathTimer = 0;
@@ -487,19 +486,19 @@ function startGame(){
   STATE = 'playing';
   showScreen(null);
   setHudVisible(true);
-  if (S.soundOn){ sndDrive.currentTime = 0; sndDrive.play().catch(() => {}); }
+  if (S.soundOn){ startEngine(); }
   if (raf) cancelAnimationFrame(raf);
   raf = requestAnimationFrame(loop);
 }
 function pauseGame(){
   if (STATE !== 'playing') return;
-  STATE = 'paused'; showScreen('pause'); sndDrive.pause();
+  STATE = 'paused'; showScreen('pause'); stopEngine(); stopScreech();
   if (raf){ cancelAnimationFrame(raf); raf = null; }
 }
 function resumeGame(){
   if (STATE !== 'paused') return;
   STATE = 'playing'; showScreen(null); lastTime = 0;
-  if (S.soundOn) sndDrive.play().catch(() => {});
+  if (S.soundOn) startEngine();
   raf = requestAnimationFrame(loop);
 }
 async function doGameOver(){
@@ -593,7 +592,7 @@ async function doGameOver(){
   }
 }
 function goHome(){
-  STATE = 'home'; sndDrive.pause();
+  STATE = 'home'; stopEngine(); stopScreech();
   if (raf){ cancelAnimationFrame(raf); raf = null; }
   traffic = []; particles = []; pops = [];
   setHudVisible(false); showScreen('home');
@@ -734,10 +733,11 @@ function draw(){
 
 /* ── HUD UPDATE ──────────────────────────────────────── */
 function updateHUD(){
-  const pct = Math.min(100, (roadSpeed - BASE_SPD) / (BASE_SPD * 1.8) * 100);
-  const kmh = Math.round(80 + pct * 1.8);
+  // pct: 0 at standstill, 100 at max normal speed
+  const pct = Math.min(100, (roadSpeed / (BASE_SPD * 2.8)) * 100);
+  const kmh = Math.round(pct * 1.8);
   drawSpeedometer(kmh);
-  if (S.soundOn) sndDrive.playbackRate = 0.85 + pct / 100 * 0.65;
+  if (S.soundOn) updateEngineAudio(pct, boostActive, brakeActive);
 }
 
 /* ── MAIN LOOP ───────────────────────────────────────── */
@@ -753,14 +753,22 @@ function loop(ts){
     if (boostActive){ boostTimer -= dt * 16.667; if (boostTimer <= 0) boostActive = false; }
     if (hornActive)  { hornTimer  -= dt * 16.667; if (hornTimer  <= 0) hornActive  = false; }
 
-    // Speed scaling: all dependent on roadSpeed
-    const targetSpeed = boostActive ? BASE_SPD * 2 :
-                        brakeActive ? BASE_SPD * 0.35 :
-                        BASE_SPD + (level - 1) * 0.35;   // gentler level ramp
+    // Speed scaling: accelerate from 0 on start, then scale with level/boost/brake
+    const cruiseSpeed = BASE_SPD + (level - 1) * 0.35;
+    const targetSpeed = boostActive ? cruiseSpeed * 2 :
+                        brakeActive ? cruiseSpeed * 0.35 :
+                        cruiseSpeed;
+    // Slow ramp at very low speeds (launch feel), faster lerp once up to speed
     const speedLerp = boostActive ? 0.05 * dt :
                       brakeActive ? 0.08 * dt :
+                      roadSpeed < BASE_SPD * 0.5 ? 0.004 * dt :  // slow launch
+                      roadSpeed < BASE_SPD        ? 0.008 * dt :  // mid ramp
                       0.012 * dt;
     roadSpeed = lerp(roadSpeed, targetSpeed, speedLerp);
+
+    // Tyre screech during braking (only at meaningful speed)
+    const pctNow = Math.min(100, (roadSpeed / (BASE_SPD * 2.8)) * 100);
+    if (brakeActive && pctNow > 20) startScreech(); else stopScreech();
 
     carYOffsetTarget = boostActive ? CAR_BOOST_Y_LIFT : brakeActive ? BRAKE_Y_LIFT : 0;
     carYOffset = lerp(carYOffset, carYOffsetTarget, 0.12 * dt);
@@ -777,8 +785,8 @@ function loop(ts){
       if (Math.abs(carVelX) > 3){          // only crash on fast impact
         spawnExplosion(carX + CAR_W/2, GH_BASE - CAR_H - CAR_BASE_Y_OFFSET);
         STATE = 'dying'; deathTimer = 520;
-        sndDrive.pause();
-        if (S.soundOn){ sndCrash.currentTime = 0; sndCrash.play().catch(() => {}); }
+        stopEngine(); stopScreech();
+        playCrash();
         gc.classList.add('shake');
         setTimeout(() => gc.classList.remove('shake'), 400);
         raf = requestAnimationFrame(loop);
@@ -834,8 +842,8 @@ function loop(ts){
       if (overlaps(chb, hbox(npcDrawX, t.y, NPC_W, NPC_H))){
         spawnExplosion(carX + CAR_W/2, carDrawY + CAR_H/2);
         STATE = 'dying'; deathTimer = 520;
-        sndDrive.pause();
-        if (S.soundOn){ sndCrash.currentTime = 0; sndCrash.play().catch(() => {}); }
+        stopEngine(); stopScreech();
+        playCrash();
         gc.classList.add('shake');
         setTimeout(() => gc.classList.remove('shake'), 400);
         break;
@@ -848,6 +856,7 @@ function loop(ts){
         nearMissTimer = 60; score += 2; scoreEl.textContent = score;
         pops.push({x: npcDrawX + NPC_W/2, y: t.y, a: 1, t: 'CLOSE!', c: '#ffcc00'});
         if (S.vibrateOn && navigator.vibrate) navigator.vibrate(30);
+        playWhoosh();
       }
     }
     if (nearMissTimer > 0) nearMissTimer -= dt;
@@ -895,15 +904,327 @@ function loop(ts){
   raf = requestAnimationFrame(loop);
 }
 
-/* ── REALISTIC HORN (Web Audio API) ─────────────────── */
-let hornAudioCtx = null;
+/* ═══════════════════════════════════════════════════════
+   AUDIO ENGINE  —  multi-layer realistic car engine
+   ═══════════════════════════════════════════════════════
+   Architecture:
+     [engine.mp3 source] ──┐
+     [synth harmonics  ] ──┼─► [waveshaper] ─► [lowpass] ─► [compressor] ─► [boostGain] ─► [masterGain] ─► out
+   RPM model: 700 rpm idle → 7000 rpm redline
+   ═══════════════════════════════════════════════════════ */
+
+let audioCtx = null;
 function getAudioCtx(){
-  if (!hornAudioCtx || hornAudioCtx.state === 'closed')
-    hornAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (hornAudioCtx.state === 'suspended') hornAudioCtx.resume();
-  return hornAudioCtx;
+  if (!audioCtx || audioCtx.state === 'closed')
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
 }
 
+// ── RPM constants ──
+const RPM_IDLE   = 700;
+const RPM_CRUISE = 3200;
+const RPM_MAX    = 6800;
+function speedToRPM(spd, isBoost, isBrake){
+  if (isBrake) return Math.max(RPM_IDLE, _currentRPM * 0.6);
+  const base = RPM_IDLE + (spd / (BASE_SPD * 2.8)) * (RPM_CRUISE - RPM_IDLE);
+  return isBoost ? Math.min(RPM_MAX, base * 1.9) : Math.min(RPM_MAX, base);
+}
+function rpmToRate(rpm){ return Math.max(0.3, rpm / 2000); }
+function rpmToHz(rpm) { return (rpm / 60) * 2; }  // 4-cyl: 2 firing events/rev
+
+// ── Engine state ──
+let engineBuffer   = null;
+let _engineLoading = false;
+let eng            = null;
+let _currentRPM    = RPM_IDLE;
+let _rpmTick       = 0;
+
+// Waveshaper — combustion harmonic distortion
+function makeDistortionCurve(amount){
+  const n = 512, c = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const x = (i * 2) / n - 1;
+    c[i] = ((Math.PI + amount) * x) / (Math.PI + amount * Math.abs(x));
+  }
+  return c;
+}
+
+async function loadEngineBuffer(){
+  if (engineBuffer || _engineLoading) return;
+  _engineLoading = true;
+  try {
+    const ac   = getAudioCtx();
+    const resp = await fetch('sounds/engine.mp3');
+    const ab   = await resp.arrayBuffer();
+    engineBuffer = await ac.decodeAudioData(ab);
+  } catch(e){ console.warn('engine.mp3 failed — synth layer active', e); }
+  _engineLoading = false;
+}
+loadEngineBuffer();
+
+function startEngine(){
+  if (!S.soundOn) return;
+  stopEngine();
+  const ac  = getAudioCtx();
+  const now = ac.currentTime;
+  _currentRPM = RPM_IDLE;
+
+  // ── Output chain (all layers feed into this) ──
+  const masterGain = ac.createGain();
+  masterGain.gain.setValueAtTime(0.001, now);
+  masterGain.gain.linearRampToValueAtTime(0.72, now + 1.4);  // soft start fade-in
+
+  const boostGain = ac.createGain();
+  boostGain.gain.value = 1;
+
+  const comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -16;
+  comp.knee.value      = 10;
+  comp.ratio.value     = 5;
+  comp.attack.value    = 0.004;
+  comp.release.value   = 0.20;
+
+  const lp = ac.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = 2800; lp.Q.value = 0.7;
+
+  const waveshaper = ac.createWaveShaper();
+  waveshaper.curve      = makeDistortionCurve(55);
+  waveshaper.oversample = '4x';
+
+  waveshaper.connect(lp);
+  lp.connect(comp);
+  comp.connect(boostGain);
+  boostGain.connect(masterGain);
+  masterGain.connect(ac.destination);
+
+  // ── Layer A: engine.mp3 pitch-shifted by RPM ──
+  let src = null;
+  if (engineBuffer){
+    const srcGain = ac.createGain();
+    srcGain.gain.value = 0.70;
+    src = ac.createBufferSource();
+    src.buffer = engineBuffer;
+    src.loop   = true;
+    src.playbackRate.value = rpmToRate(RPM_IDLE);
+    src.connect(srcGain);
+    srcGain.connect(waveshaper);
+    src.start(now);
+  }
+
+  // ── Layer B: synthesised harmonic stack (4-cyl model) ──
+  const harmonicDefs = [
+    { mult: 1,   amp: 0.36, type: 'sawtooth' },  // fundamental — piston stroke
+    { mult: 2,   amp: 0.20, type: 'sawtooth' },  // 2nd harmonic
+    { mult: 3,   amp: 0.09, type: 'square'   },  // 3rd — adds growl
+    { mult: 4,   amp: 0.05, type: 'sawtooth' },  // 4th
+    { mult: 0.5, amp: 0.08, type: 'sine'     },  // sub — exhaust rumble
+  ];
+  const baseHz    = rpmToHz(RPM_IDLE);
+  const synthNodes = harmonicDefs.map(def => {
+    const osc = ac.createOscillator();
+    const g   = ac.createGain();
+    osc.type            = def.type;
+    osc.frequency.value = baseHz * def.mult;
+    g.gain.value        = def.amp;
+    osc.connect(g); g.connect(waveshaper);
+    osc.start(now);
+    return { osc, g, mult: def.mult, baseAmp: def.amp };
+  });
+
+  eng = { src, synthNodes, lp, comp, boostGain, masterGain };
+}
+
+function stopEngine(){
+  if (!eng) return;
+  try {
+    if (eng.src) eng.src.stop();
+    eng.synthNodes.forEach(n => n.osc.stop());
+  } catch {}
+  eng = null;
+}
+
+// Called every frame from updateHUD
+function updateEngineAudio(pct, isBoost, isBrake){
+  if (!eng) return;
+  const ac  = getAudioCtx();
+  const now = ac.currentTime;
+
+  // Smooth RPM — engine inertia
+  const targetRPM = speedToRPM(roadSpeed, isBoost, isBrake);
+  const rpmLerp   = isBoost ? 0.10 : isBrake ? 0.06 : 0.028;
+  _currentRPM     = _currentRPM + (targetRPM - _currentRPM) * rpmLerp;
+
+  // Micro-flutter every 4 frames — uneven cylinder firing
+  _rpmTick++;
+  const rpmDisplay = (_rpmTick % 4 === 0)
+    ? _currentRPM * (0.985 + Math.random() * 0.03)
+    : _currentRPM;
+
+  const rate  = rpmToRate(rpmDisplay);
+  const freqHz = rpmToHz(rpmDisplay);
+
+  if (eng.src){
+    eng.src.playbackRate.linearRampToValueAtTime(rate, now + 0.055);
+  }
+  eng.synthNodes.forEach(n => {
+    n.osc.frequency.linearRampToValueAtTime(freqHz * n.mult, now + 0.055);
+    // Quieter at idle, fuller at high rpm
+    const rpmFactor = Math.min(1, (_currentRPM - RPM_IDLE) / (RPM_CRUISE - RPM_IDLE));
+    n.g.gain.linearRampToValueAtTime(n.baseAmp * (0.45 + rpmFactor * 0.7), now + 0.08);
+  });
+
+  // LP cutoff opens with RPM — more top-end at high revs
+  const lpFreq = 850 + (_currentRPM / RPM_MAX) * 3400;
+  eng.lp.frequency.linearRampToValueAtTime(lpFreq, now + 0.10);
+
+  // Master volume
+  const vol = 0.52 + (pct / 100) * 0.22;
+  eng.masterGain.gain.linearRampToValueAtTime(isBoost ? vol + 0.18 : vol, now + 0.10);
+}
+
+// Boost surge — pitch/gain spike + turbo hiss
+function playBoostSurge(){
+  if (!S.soundOn || !eng) return;
+  const ac  = getAudioCtx();
+  const now = ac.currentTime;
+  eng.boostGain.gain.cancelScheduledValues(now);
+  eng.boostGain.gain.setValueAtTime(eng.boostGain.gain.value, now);
+  eng.boostGain.gain.linearRampToValueAtTime(1.9,  now + 0.08);
+  eng.boostGain.gain.linearRampToValueAtTime(1.35, now + 0.45);
+  eng.boostGain.gain.linearRampToValueAtTime(1.0,  now + 1.6);
+  _currentRPM = Math.min(RPM_MAX, _currentRPM * 1.6);
+  _playTurboHiss();
+}
+
+function _playTurboHiss(){
+  if (!S.soundOn) return;
+  try {
+    const ac  = getAudioCtx();
+    const now = ac.currentTime;
+    const len = Math.floor(ac.sampleRate * 0.9);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d   = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const src = ac.createBufferSource(); src.buffer = buf;
+    const hp  = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2200;
+    const bp  = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 4000; bp.Q.value = 2.2;
+    const g   = ac.createGain();
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(0.26, now + 0.05);
+    g.gain.setValueAtTime(0.26,         now + 0.28);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.88);
+    src.connect(hp); hp.connect(bp); bp.connect(g); g.connect(ac.destination);
+    src.start(now); src.stop(now + 0.9);
+  } catch {}
+}
+
+
+// ── Tyre screech (synthesised — no extra file needed) ──
+let screeching = false;
+let screechNodes = null;
+function startScreech(){
+  if (!S.soundOn || screeching) return;
+  screeching = true;
+  try {
+    const ac = getAudioCtx();
+    const now = ac.currentTime;
+    // White noise via script processor (or buffer trick)
+    const bufSize = ac.sampleRate * 2;
+    const buf = ac.createBuffer(1, bufSize, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+    const src = ac.createBufferSource();
+    src.buffer = buf; src.loop = true;
+
+    // Band-pass to make it sound like tyre rubber
+    const bpf = ac.createBiquadFilter();
+    bpf.type = 'bandpass'; bpf.frequency.value = 800; bpf.Q.value = 0.4;
+
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(0.28, now + 0.12);
+
+    src.connect(bpf); bpf.connect(g); g.connect(ac.destination);
+    src.start();
+    screechNodes = { src, g };
+  } catch {}
+}
+function stopScreech(){
+  if (!screeching || !screechNodes) return;
+  screeching = false;
+  try {
+    const ac = getAudioCtx();
+    const now = ac.currentTime;
+    screechNodes.g.gain.linearRampToValueAtTime(0, now + 0.18);
+    const s = screechNodes.src;
+    setTimeout(() => { try { s.stop(); } catch {} }, 250);
+  } catch {}
+  screechNodes = null;
+}
+
+// ── Near-miss whoosh (synthesised) ──
+function playWhoosh(){
+  if (!S.soundOn) return;
+  try {
+    const ac = getAudioCtx();
+    const now = ac.currentTime;
+    const bufSize = ac.sampleRate * 0.35;
+    const buf = ac.createBuffer(1, bufSize, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+
+    const bpf = ac.createBiquadFilter();
+    bpf.type = 'bandpass';
+    bpf.frequency.setValueAtTime(3500, now);
+    bpf.frequency.linearRampToValueAtTime(600, now + 0.3);
+    bpf.Q.value = 1.2;
+
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.5, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+
+    src.connect(bpf); bpf.connect(g); g.connect(ac.destination);
+    src.start(now); src.stop(now + 0.35);
+  } catch {}
+}
+
+// ── Crash: play crash.mp3 + layered metal crunch (synthesised) ──
+const sndCrash = $('snd-crash');
+function playCrash(){
+  if (!S.soundOn) return;
+  // File layer
+  sndCrash.currentTime = 0;
+  sndCrash.play().catch(() => {});
+  // Synthesised low crunch layer
+  try {
+    const ac = getAudioCtx();
+    const now = ac.currentTime;
+    const bufSize = Math.floor(ac.sampleRate * 0.6);
+    const buf = ac.createBuffer(1, bufSize, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++){
+      const t = i / ac.sampleRate;
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-t * 8);
+    }
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+
+    const lp = ac.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 380;
+
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.9, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+
+    src.connect(lp); lp.connect(g); g.connect(ac.destination);
+    src.start(now); src.stop(now + 0.65);
+  } catch {}
+}
+
+/* ── REALISTIC HORN (Web Audio API) ─────────────────── */
 function playHorn(){
   if (!S.soundOn) return;
   try {
@@ -937,14 +1258,7 @@ function playHorn(){
     noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
     noise.connect(noiseGain); noiseGain.connect(masterGain);
     noise.start(now); noise.stop(now + 0.12);
-
-    const bpf = ac.createBiquadFilter();
-    bpf.type = 'bandpass';
-    bpf.frequency.setValueAtTime(900, now);
-    bpf.Q.value = 0.8;
-    masterGain.connect(bpf);
-
-  } catch (e2) {}
+  } catch {}
 }
 
 /* ── BUTTON EVENTS ───────────────────────────────────── */
@@ -1022,6 +1336,7 @@ $('btn-boost').addEventListener('pointerdown', e => {
   e.preventDefault();
   if (STATE !== 'playing') return;
   boostActive = true; boostTimer = 1400;
+  playBoostSurge();
   showToast(boostToast, 400);
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate(40);
 });
@@ -1053,9 +1368,9 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft')       steerInput = -1;
   else if (e.key === 'ArrowRight') steerInput = 1;
   else if (e.key === 'ArrowDown')  brakeActive = true;
-  else if (e.key === 'ArrowUp'){ boostActive = true; boostTimer = 1400; }
+  else if (e.key === 'ArrowUp'){ boostActive = true; boostTimer = 1400; playBoostSurge(); }
   else if (e.key === ' ') STATE === 'playing' ? pauseGame() : STATE === 'paused' ? resumeGame() : null;
-  else if (e.key === 'b' || e.key === 'B'){ boostActive = true; boostTimer = 1400; }
+  else if (e.key === 'b' || e.key === 'B'){ boostActive = true; boostTimer = 1400; playBoostSurge(); }
   else if (e.key === 'h' || e.key === 'H'){
     playHorn(); hornActive = true; hornTimer = 1200;
   }
