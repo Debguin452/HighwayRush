@@ -328,16 +328,22 @@ async function lbFetch(){
 // Merge the local player's known best into a leaderboard dataset.
 // Ensures that if the remote hasn't received the latest upload yet (or is
 // stale), the player's own entry is never silently removed or downgraded.
+// Uses IP as the primary key so two players with the same name stay separate.
 function mergeLocalBestIntoData(data){
   if (!playerName) return data;
   const nameKey = playerName.trim().toLowerCase();
   const localBest = best || +localStorage.getItem('hr_best') || 0;
   if (!localBest) return data;
-  const existing = data.find(e => e.name.trim().toLowerCase() === nameKey);
+  // Find this device's entry by IP first, then fall back to name
+  const existing = clientIP
+    ? (data.find(e => e.ip === clientIP) || data.find(e => !e.ip && e.name.trim().toLowerCase() === nameKey))
+    : data.find(e => e.name.trim().toLowerCase() === nameKey);
   if (existing && existing.score >= localBest) return data; // remote already has best or better
   // Remote is missing or outdated — upsert with the local best
-  const filtered = data.filter(e => e.name.trim().toLowerCase() !== nameKey);
-  const upserted = { name: playerName.trim().slice(0, 16), score: localBest, ts: existing ? existing.ts : Date.now() };
+  const filtered = clientIP
+    ? data.filter(e => e.ip ? e.ip !== clientIP : e.name.trim().toLowerCase() !== nameKey)
+    : data.filter(e => e.name.trim().toLowerCase() !== nameKey);
+  const upserted = { name: playerName.trim().slice(0, 16), score: localBest, ts: existing ? existing.ts : Date.now(), ip: clientIP || undefined };
   return [...filtered, upserted].sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
 }
 
@@ -347,7 +353,10 @@ function mergeLocalBestIntoData(data){
 function syncBestFromRemote(){
   if (!playerName || !lbData.length) return;
   const key = playerName.trim().toLowerCase();
-  const entry = lbData.find(e => e.name.trim().toLowerCase() === key);
+  // Find this device's entry by IP first, then fall back to name
+  const entry = clientIP
+    ? (lbData.find(e => e.ip === clientIP) || lbData.find(e => !e.ip && e.name.trim().toLowerCase() === key))
+    : lbData.find(e => e.name.trim().toLowerCase() === key);
   if (!entry) return;
   if (entry.score > best){
     best = entry.score;
@@ -374,14 +383,22 @@ async function lbPush(name, scoreVal){
 
   // Always use live lbData (just fetched) so we compare against real remote scores
   const base = lbData.length ? lbData : lbLoadCache();
-  const prev = base.find(e => e.name.trim().toLowerCase() === nameKey);
+  // Match by IP first (same player, possibly renamed), then fall back to name-only
+  // when IP is unavailable. Two players with the same name but different IPs keep
+  // separate leaderboard entries.
+  const prev = ip
+    ? (base.find(e => e.ip === ip) || base.find(e => !e.ip && e.name.trim().toLowerCase() === nameKey))
+    : base.find(e => e.name.trim().toLowerCase() === nameKey);
 
   // Final score = highest of: what we're submitting, local hr_best, and remote best
   // This prevents any downgrade and resolves conflicts by always taking the max.
   const finalScore = Math.max(scoreVal, prev ? prev.score : 0, best);
   const entry = { name: name.trim().slice(0, 16), score: finalScore, ts: Date.now(), ip };
 
-  const filtered = base.filter(e => e.name.trim().toLowerCase() !== nameKey);
+  // Remove the previous entry for this IP (or name if no IP), then add updated one
+  const filtered = ip
+    ? base.filter(e => e.ip ? e.ip !== ip : e.name.trim().toLowerCase() !== nameKey)
+    : base.filter(e => e.name.trim().toLowerCase() !== nameKey);
   const merged = [...filtered, entry]
     .sort((a, b) => b.score - a.score)
     .slice(0, MAX_LB_ENTRIES);
@@ -416,7 +433,11 @@ function renderLB(data, myName){
     const rankEmoji = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '';
     const rankNum = rankEmoji || (i + 1);
     const rankCls = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
-    const isMe = me && e.name.trim().toLowerCase() === me;
+    // Identify "YOU" by IP when available; fall back to name match so that two
+    // players sharing the same name each only see their own row highlighted.
+    const isMe = clientIP
+      ? (e.ip === clientIP)
+      : (me && e.name.trim().toLowerCase() === me);
     if (isMe){ myRank = i + 1; myScore = e.score; }
     const isMeClass = isMe ? ' lb-row--me' : '';
     const topClass = i < 3 ? ' lb-row--top lb-row--rank' + i : '';
@@ -511,13 +532,16 @@ async function doGameOver(){
     // Show cached leaderboard immediately with optimistic entry
     const nameKey = playerName.toLowerCase();
     const cached = lbLoadCache();
-    const cachedEntry = cached.find(e => e.name.toLowerCase() === nameKey);
+    // Use IP to find this player's entry in the cache; fall back to name
+    const cachedEntry = clientIP
+      ? (cached.find(e => e.ip === clientIP) || cached.find(e => !e.ip && e.name.toLowerCase() === nameKey))
+      : cached.find(e => e.name.toLowerCase() === nameKey);
     const shouldUpdate = !cachedEntry || score > cachedEntry.score;
 
     if (shouldUpdate){
       // Insert optimistic entry right away so player sees their position immediately
-      const optimistic = { name: playerName, score, ts: Date.now(), _optimistic: true };
-      const optimisticList = [...cached.filter(e => e.name.toLowerCase() !== nameKey), optimistic]
+      const optimistic = { name: playerName, score, ts: Date.now(), _optimistic: true, ip: clientIP || undefined };
+      const optimisticList = [...cached.filter(e => clientIP ? (e.ip ? e.ip !== clientIP : e.name.toLowerCase() !== nameKey) : e.name.toLowerCase() !== nameKey), optimistic]
         .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
       lbSaveCache(optimisticList);
       lbData = optimisticList;
@@ -532,17 +556,20 @@ async function doGameOver(){
 
     // Fetch live data and push in background — update display when done
     lbFetch().then(() => {
-      const liveEntry = lbData.find(e => e.name.toLowerCase() === nameKey);
+      // Use IP to find this player's live entry; fall back to name
+      const liveEntry = clientIP
+        ? (lbData.find(e => e.ip === clientIP) || lbData.find(e => !e.ip && e.name.toLowerCase() === nameKey))
+        : lbData.find(e => e.name.toLowerCase() === nameKey);
       const reallyUpdate = !liveEntry || score > liveEntry.score;
       if (reallyUpdate){
         // Re-insert with live data as base (lbData is now fresh from lbFetch)
-        const optimistic2 = { name: playerName, score, ts: Date.now(), _optimistic: true };
-        lbData = [...lbData.filter(e => e.name.toLowerCase() !== nameKey), optimistic2]
+        const optimistic2 = { name: playerName, score, ts: Date.now(), _optimistic: true, ip: clientIP || undefined };
+        lbData = [...lbData.filter(e => clientIP ? (e.ip ? e.ip !== clientIP : e.name.toLowerCase() !== nameKey) : e.name.toLowerCase() !== nameKey), optimistic2]
           .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
         lbSaveCache(lbData);
         lbPush(playerName, score).then(() => {
           // Remove _optimistic flag after confirmed push
-          lbData = lbData.map(e => e._optimistic ? { name: e.name, score: e.score, ts: e.ts } : e);
+          lbData = lbData.map(e => e._optimistic ? { name: e.name, score: e.score, ts: e.ts, ip: e.ip } : e);
           lbSaveCache(lbData);
           const ri = renderLB(lbData, playerName);
           if (ri) statusEl.textContent = 'Rank #' + ri.rank + ' \u2014 ' + ri.score.toLocaleString() + ' pts \u2713';
@@ -954,8 +981,9 @@ $('lb-submit-btn').addEventListener('click', async () => {
   // Build optimistic list immediately so player sees their rank right away
   const nameKey = name.toLowerCase();
   const base = lbData.length ? lbData : lbLoadCache();
-  const optimisticEntry = { name, score, ts: Date.now(), _optimistic: true };
-  const withNew = [...base.filter(e => e.name.toLowerCase() !== nameKey), optimisticEntry]
+  const optimisticEntry = { name, score, ts: Date.now(), _optimistic: true, ip: clientIP || undefined };
+  // Filter out any existing entry for this IP (or name if no IP)
+  const withNew = [...base.filter(e => clientIP ? (e.ip ? e.ip !== clientIP : e.name.toLowerCase() !== nameKey) : e.name.toLowerCase() !== nameKey), optimisticEntry]
     .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
   lbSaveCache(withNew);
   lbData = withNew;
@@ -970,7 +998,7 @@ $('lb-submit-btn').addEventListener('click', async () => {
 
   // Push to server in background; update status when confirmed
   lbPush(name, score).then(() => {
-    lbData = lbData.map(e => e._optimistic ? { name: e.name, score: e.score, ts: e.ts } : e);
+    lbData = lbData.map(e => e._optimistic ? { name: e.name, score: e.score, ts: e.ts, ip: e.ip } : e);
     lbSaveCache(lbData);
     const ri = renderLB(lbData, playerName);
     if (ri) $('lb-submit-status').textContent = 'Rank #' + ri.rank + ' \u2014 ' + ri.score.toLocaleString() + ' pts \u2713';
