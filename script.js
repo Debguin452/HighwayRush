@@ -5,8 +5,8 @@ const LANE_X = [22, 63, 104, 145, 186, 227, 275, 322, 350];
 const NPC_IMGS = ['./images/traffic.png','./images/traffic2.png','./images/traffic3.png','./images/traffic4.png'];
 const CAR_W = 48, CAR_H = 70, NPC_W = 46, NPC_H = 68;
 const SAFE_GAP = 160, HITPAD = 10;
-const BASE_SPD = 5;           // reduced base speed
-const SPAWN_MS = 600;         // slower spawn rate
+const BASE_SPD = 7;           // reduced base speed
+const SPAWN_MS = 550;         // slower spawn rate
 const CAR_BASE_Y_OFFSET = 18;
 const CAR_BOOST_Y_LIFT = 18;
 const BRAKE_Y_LIFT = -10;
@@ -50,6 +50,7 @@ const scoreEl = $('score-val'), levelEl = $('level-val');
 const screenHome = $('screen-home'), screenPause = $('screen-pause');
 const screenGO = $('screen-gameover'), screenSettings = $('screen-settings');
 const screenLB = $('screen-leaderboard');
+const screenStats = $('screen-stats'), screenAch = $('screen-achievements');
 const goScoreEl = $('go-score'), goBestEl = $('go-best'), goLevelEl = $('go-level');
 const bestEl = $('best-score'), newBestBadge = $('new-best-badge'), levelToast = $('level-up-toast');
 const boostToast = $('boost-toast'), gyroHint = $('gyro-hint');
@@ -72,7 +73,7 @@ const npcImgs = NPC_IMGS.map(s => { const i = new Image(); i.src = s; return i; 
 
 let STATE = 'home';
 let score = 0, level = 1, best = +localStorage.getItem('hr_best') || 0;
-let roadSpeed = BASE_SPD, roadY = 0;
+let roadSpeed = 0, roadY = 0;
 let carX = (GW - CAR_W) / 2;
 let carVelX = 0, carTilt = 0, carTiltTarget = 0;
 let steerInput = 0, gyroSteer = 0;
@@ -83,6 +84,59 @@ let raf = null, lastTime = 0, spawnTimer = 0, deathTimer = 0, nearMissTimer = 0;
 
 // Horn avoidance state
 let hornActive = false, hornTimer = 0;
+
+/* ── STREAK / COMBO ───────────────────────────────────── */
+let streak = 0, streakTimer = 0;          // consecutive near-misses
+const STREAK_TIMEOUT = 280;               // frames before streak expires (≈4.7s)
+const STREAK_THRESHOLDS = [2, 4, 7, 10];  // near-misses needed for ×2 ×3 ×4 ×5
+
+/* ── SPEED LINES (boost FX) ──────────────────────────── */
+let speedLines = [];    // {x,y,len,alpha,speed} — drawn during boost
+
+/* ── PLAYER STATS (persist in localStorage) ──────────── */
+const STATS_KEY = 'hr_stats';
+let stats = { games: 0, distance: 0, bestStreak: 0, hornUsed: 0 };
+try { Object.assign(stats, JSON.parse(localStorage.getItem(STATS_KEY) || '{}')); } catch {}
+function saveStats(){ localStorage.setItem(STATS_KEY, JSON.stringify(stats)); }
+
+/* ── ACHIEVEMENTS ────────────────────────────────────── */
+const ACHIEVEMENT_KEY = 'hr_achievements';
+let achievements = {};   // { id: true }
+try { achievements = JSON.parse(localStorage.getItem(ACHIEVEMENT_KEY) || '{}'); } catch {}
+function saveAchievements(){ localStorage.setItem(ACHIEVEMENT_KEY, JSON.stringify(achievements)); }
+
+const ACHIEVEMENT_DEFS = [
+  { id: 'first_blood',  label: '🩸 First Blood',    desc: 'Survive your first game',        check: () => stats.games >= 1               },
+  { id: 'speeder',      label: '⚡ Speeder',          desc: 'Reach level 5',                   check: () => level >= 5                     },
+  { id: 'zen',          label: '🧘 Zen Driver',       desc: 'Finish a game without using horn', check: () => stats.hornUsed === 0 && score >= 10 },
+  { id: 'ghost',        label: '👻 Ghost',            desc: '10 near-misses in one game',       check: () => _gameMisses >= 10              },
+  { id: 'combo_master', label: '🔥 Combo Master',     desc: 'Hit a ×4 streak multiplier',       check: () => streak >= 7                    },
+  { id: 'century',      label: '💯 Century',          desc: 'Score 100 in one game',            check: () => score >= 100                   },
+  { id: 'survivor',     label: '🛡️ Survivor',         desc: 'Play 10 games',                    check: () => stats.games >= 10              },
+];
+let _gameMisses = 0;   // near-misses this game (for Ghost achievement)
+let _hornThisGame = false;
+
+/* ── DAILY CHALLENGE ─────────────────────────────────── */
+const DAILY_KEY = 'hr_daily';
+function getTodaySeed(){
+  const d = new Date();
+  return d.getFullYear() * 10000 + (d.getMonth()+1) * 100 + d.getDate();
+}
+let dailyState = { seed: 0, done: false, score: 0 };
+try { dailyState = Object.assign(dailyState, JSON.parse(localStorage.getItem(DAILY_KEY) || '{}')); } catch {}
+// Simple seeded PRNG (mulberry32) — deterministic traffic for daily mode
+function makePRNG(seed){
+  let s = seed >>> 0;
+  return function(){
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    let t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+let dailyMode = false;
+let dailyRng  = null;
 
 bestEl.textContent = best;
 
@@ -157,12 +211,15 @@ function drawSpeedometer(speedKmh){
 
 /* ── SCREEN MGMT ─────────────────────────────────────── */
 function showScreen(name){
-  [screenHome, screenPause, screenGO, screenSettings, screenLB].forEach(s => s.classList.remove('active'));
-  if (name === 'home')        screenHome.classList.add('active');
-  else if (name === 'pause')  screenPause.classList.add('active');
-  else if (name === 'gameover') screenGO.classList.add('active');
-  else if (name === 'settings') screenSettings.classList.add('active');
+  const all = [screenHome, screenPause, screenGO, screenSettings, screenLB, screenStats, screenAch].filter(Boolean);
+  all.forEach(s => s.classList.remove('active'));
+  if (name === 'home')           screenHome.classList.add('active');
+  else if (name === 'pause')     screenPause.classList.add('active');
+  else if (name === 'gameover')  screenGO.classList.add('active');
+  else if (name === 'settings')  screenSettings.classList.add('active');
   else if (name === 'leaderboard') screenLB.classList.add('active');
+  else if (name === 'stats')     { if(screenStats){ screenStats.classList.add('active'); renderStatsScreen(); } }
+  else if (name === 'achievements') { if(screenAch){ screenAch.classList.add('active'); renderAchievementsTab(); } }
 }
 function setHudVisible(v){
   const o = v ? '1' : '0';
@@ -173,7 +230,7 @@ function setHudVisible(v){
 /* ── SETTINGS ────────────────────────────────────────── */
 function applySettingsUI(){
   const map = {
-    'set-sound':   [S.soundOn,   v => { S.soundOn   = v; if(!v){ stopEngine(); stopScreech(); } else if(STATE==='playing') startEngine(); }],
+    'set-sound':   [S.soundOn,   v => { S.soundOn   = v; if(!v){ stopEngine(); } else if(STATE==='playing') startEngine(); }],
     'set-vibrate': [S.vibrateOn, v => { S.vibrateOn = v; }],
     'set-gyro':    [S.gyroOn,    v => { S.gyroOn    = v; gyroHint.hidden = !v; if(v) requestGyroPermission(); }],
     'set-swipe':   [S.swipeOn,   v => { S.swipeOn   = v; }],
@@ -491,15 +548,17 @@ async function openLeaderboard(){
 
 /* ── GAME LIFECYCLE ──────────────────────────────────── */
 function startGame(){
-  traffic = []; particles = []; pops = [];
+  traffic = []; particles = []; pops = []; speedLines = [];
   score = 0; level = 1; roadSpeed = 0;
   carX = (GW - CAR_W) / 2; carVelX = 0; steerInput = 0; gyroSteer = 0;
   carYOffset = 0; carYOffsetTarget = 0; carTilt = 0; carTiltTarget = 0;
   roadY = 0; lastTime = 0; spawnTimer = 0; deathTimer = 0;
   boostActive = false; boostTimer = 0; brakeActive = false; nearMissTimer = 0;
   hornActive = false; hornTimer = 0;
+  streak = 0; streakTimer = 0; _gameMisses = 0; _hornThisGame = false;
   speedoNeedle = 60;
   scoreEl.textContent = '0'; levelEl.textContent = '1';
+  updateStreakHUD();
   STATE = 'playing';
   showScreen(null);
   setHudVisible(true);
@@ -520,6 +579,23 @@ function resumeGame(){
 }
 async function doGameOver(){
   STATE = 'gameover';
+
+  // ── Update persistent stats ──
+  stats.games++;
+  stats.distance += Math.round(score * 18);   // rough metres per point
+  if (streak > stats.bestStreak) stats.bestStreak = streak;
+  if (!_hornThisGame) stats.hornUsed = 0; else stats.hornUsed++;
+  saveStats();
+
+  // ── Check achievements before showing screen ──
+  checkAchievements();
+
+  // ── Daily challenge wrap-up ──
+  finishDailyChallenge();
+
+  // ── Reset streak display ──
+  resetStreak(); updateStreakHUD();
+
   const isNew = score > best;
   if (isNew){ best = score; localStorage.setItem('hr_best', best); }
   bestEl.textContent = best;
@@ -572,6 +648,9 @@ async function doGameOver(){
 
     // Fetch live data and push in background — update display when done
     lbFetch().then(() => {
+      // syncBestFromRemote ran inside lbFetch — refresh displayed best
+      goBestEl.textContent = best;
+      bestEl.textContent   = best;
       // Use IP to find this player's live entry; fall back to name
       const liveEntry = clientIP
         ? (lbData.find(e => e.ip === clientIP) || lbData.find(e => !e.ip && e.name.toLowerCase() === nameKey))
@@ -627,7 +706,147 @@ function showToast(el, dur = 1000){
   setTimeout(() => { el.classList.remove('show'); setTimeout(() => { el.hidden = true; }, 250); }, dur);
 }
 function levelUp(){
-  level++; roadSpeed += 0.25; levelEl.textContent = level; showToast(levelToast, 400);
+  level++; roadSpeed += 0.25; levelEl.textContent = level; showToast(levelToast, 300);
+}
+
+/* ── STREAK HELPERS ──────────────────────────────────── */
+function getStreakMult(){
+  // Returns 1, 2, 3, 4 or 5 based on streak count
+  for (let i = STREAK_THRESHOLDS.length - 1; i >= 0; i--)
+    if (streak >= STREAK_THRESHOLDS[i]) return i + 2;
+  return 1;
+}
+
+function resetStreak(){
+  if (streak > 0){
+    if (streak > stats.bestStreak){ stats.bestStreak = streak; saveStats(); }
+    streak = 0; streakTimer = 0;
+    updateStreakHUD();
+  }
+}
+
+function updateStreakHUD(){
+  const el = $('streak-display');
+  if (!el) return;
+  const mult = getStreakMult();
+  if (streak === 0 || mult === 1){
+    el.style.opacity = '0';
+    el.style.transform = 'scale(0.7)';
+  } else {
+    el.textContent = '\u00d7' + mult;
+    el.style.opacity = '1';
+    el.style.transform = 'scale(1)';
+    el.style.color = mult >= 5 ? '#ff3c3c' : mult >= 4 ? '#ff8c00' : mult >= 3 ? '#ffcc00' : '#39ff8a';
+  }
+}
+
+/* ── ACHIEVEMENT HELPERS ─────────────────────────────── */
+function checkAchievements(){
+  ACHIEVEMENT_DEFS.forEach(def => {
+    if (achievements[def.id]) return;          // already unlocked
+    if (!def.check()) return;
+    achievements[def.id] = true;
+    saveAchievements();
+    flashAchievementToast(def.label);
+    renderAchievementsTab();
+  });
+}
+
+function flashAchievementToast(label){
+  const el = $('achievement-toast');
+  if (!el) return;
+  el.textContent = label + '  UNLOCKED';
+  el.hidden = false; el.classList.add('show');
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => { el.hidden = true; }, 350);
+  }, 2200);
+}
+
+function renderAchievementsTab(){
+  const el = $('achievements-list');
+  if (!el) return;
+  el.innerHTML = ACHIEVEMENT_DEFS.map(def => {
+    const done = !!achievements[def.id];
+    return `<div class="ach-row${done ? ' ach-done' : ''}">
+      <span class="ach-label">${def.label}</span>
+      <span class="ach-desc">${def.desc}</span>
+      ${done ? '<span class="ach-check">\u2713</span>' : '<span class="ach-lock">\uD83D\uDD12</span>'}
+    </div>`;
+  }).join('');
+}
+
+/* ── PLAYER STATS SCREEN ─────────────────────────────── */
+function renderStatsScreen(){
+  const el = $('stats-body');
+  if (!el) return;
+  el.innerHTML = `
+    <div class="stat-row"><span class="stat-lbl">Games Played</span><span class="stat-val">${stats.games}</span></div>
+    <div class="stat-row"><span class="stat-lbl">Total Distance</span><span class="stat-val">${(stats.distance/1000).toFixed(1)} km</span></div>
+    <div class="stat-row"><span class="stat-lbl">Best Score</span><span class="stat-val">${best}</span></div>
+    <div class="stat-row"><span class="stat-lbl">Best Streak</span><span class="stat-val">${stats.bestStreak} misses</span></div>
+    <div class="stat-row"><span class="stat-lbl">Achievements</span><span class="stat-val">${Object.keys(achievements).length} / ${ACHIEVEMENT_DEFS.length}</span></div>
+  `;
+}
+
+/* ── DAILY CHALLENGE HELPERS ─────────────────────────── */
+function openDailyChallenge(){
+  const seed = getTodaySeed();
+  dailyMode = true;
+  dailyRng  = makePRNG(seed);
+  const $el = $('daily-badge');
+  if ($el) $el.hidden = dailyState.done && dailyState.seed === seed;
+  startGame();
+}
+
+function finishDailyChallenge(){
+  if (!dailyMode) return;
+  dailyMode = false;
+  const seed = getTodaySeed();
+  const prev = (dailyState.seed === seed) ? dailyState.score : 0;
+  if (score > prev){
+    dailyState = { seed, done: true, score };
+    localStorage.setItem(DAILY_KEY, JSON.stringify(dailyState));
+  }
+  const badge = $('go-daily-badge');
+  if (badge){
+    badge.hidden = false;
+    badge.textContent = score > prev ? '\uD83C\uDFC6 Daily Best: ' + score : 'Daily Score: ' + score;
+  }
+}
+
+/* ── SPEED LINES (boost FX) ──────────────────────────── */
+function spawnSpeedLines(){
+  if (speedLines.length > 22) return;
+  for (let i = 0; i < 3; i++){
+    speedLines.push({
+      x: Math.random() * GW,
+      y: Math.random() * GH_BASE * 0.6,
+      len: 18 + Math.random() * 55,
+      alpha: 0.55 + Math.random() * 0.4,
+      speed: 14 + Math.random() * 18,
+    });
+  }
+}
+
+function updateDrawSpeedLines(dt){
+  if (!boostActive){ speedLines = []; return; }
+  spawnSpeedLines();
+  ctx.save();
+  for (let i = speedLines.length - 1; i >= 0; i--){
+    const sl = speedLines[i];
+    sl.y += sl.speed * dt;
+    sl.alpha -= 0.045 * dt;
+    if (sl.alpha <= 0 || sl.y > GH_BASE + sl.len){ speedLines.splice(i, 1); continue; }
+    ctx.globalAlpha = sl.alpha * 0.7;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(sl.x, sl.y);
+    ctx.lineTo(sl.x, sl.y + sl.len);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 /* ── NPC AVOIDANCE ON HORN ───────────────────────────── */
@@ -649,7 +868,7 @@ function spawnNPC(){
   // NPC speed: an absolute component so they always look fast, plus a relative
   // component that scales up with level. At launch roadSpeed is near 0 so we
   // use Math.max to ensure a floor — NPCs are never "parked".
-  const absFloor = BASE_SPD * 0.5;                       // always at least this fast
+  const absFloor = BASE_SPD * 0.25;                       // always at least this fast — never look parked
   const relBonus = 0.6 + Math.random() * 1.0;            // extra variation
   const effectiveRoad = Math.max(BASE_SPD, roadSpeed);   // treat road as full speed for NPC calc
   const spdRel = relBonus * (effectiveRoad / BASE_SPD);
@@ -721,11 +940,14 @@ function draw(){
 
   if (boostActive){
     ctx.save();
-    for (let i = 1; i <= 3; i++){
-      ctx.globalAlpha = 0.15 / i;
-      ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY + i * 5, CAR_W, CAR_H);
+    // Ghost trail frames
+    for (let i = 1; i <= 4; i++){
+      ctx.globalAlpha = 0.13 / i;
+      ctx.drawImage(carImg, 0, 0, 120, 120, carX, carDrawY + i * 6, CAR_W, CAR_H);
     }
     ctx.restore();
+    // Speed lines
+    updateDrawSpeedLines(1);
   }
 
   if (Math.abs(carTilt) > 0.005){
@@ -750,6 +972,21 @@ function draw(){
     ctx.font = "bold 13px 'Orbitron',monospace"; ctx.textAlign = 'center';
     pops.forEach(p => { ctx.globalAlpha = p.a; ctx.fillStyle = p.c||'#fff'; ctx.fillText(p.t||'+1', p.x, p.y); });
     ctx.globalAlpha = 1; ctx.textAlign = 'left';
+  }
+
+  // Floating combo multiplier above car during active streak
+  const mult = getStreakMult();
+  if (streak > 0 && mult > 1){
+    const pulse = 0.85 + 0.15 * Math.sin(Date.now() / 120);
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, streakTimer / 40) * pulse;
+    ctx.font = `bold ${12 + mult * 2}px 'Orbitron',monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = mult >= 5 ? '#ff3c3c' : mult >= 4 ? '#ff8c00' : mult >= 3 ? '#ffcc00' : '#39ff8a';
+    ctx.shadowColor = ctx.fillStyle;
+    ctx.shadowBlur = 10;
+    ctx.fillText('\u00d7' + mult, carX + CAR_W / 2, carDrawY - 10);
+    ctx.restore();
   }
 }
 
@@ -776,14 +1013,14 @@ function loop(ts){
     if (hornActive)  { hornTimer  -= dt * 16.667; if (hornTimer  <= 0) hornActive  = false; }
 
     // Speed scaling: accelerate from 0 on start, then scale with level/boost/brake
-    const cruiseSpeed = BASE_SPD + (level - 1) * 0.35;
+    const cruiseSpeed = BASE_SPD + (level - 1) * 0.45;
     const targetSpeed = boostActive ? cruiseSpeed * 2 :
                         brakeActive ? cruiseSpeed * 0.35 :
                         cruiseSpeed;
     // Slow ramp at very low speeds (launch feel), faster lerp once up to speed
     const speedLerp = boostActive ? 0.01 * dt :
                       brakeActive ? 0.08 * dt :
-                      roadSpeed < BASE_SPD * 0.5 ? 0.01 * dt :  // slow launch
+                      roadSpeed < BASE_SPD * 0.5 ? 0.1 * dt :  // slow launch
                       roadSpeed < BASE_SPD        ? 0.008 * dt :  // mid ramp
                       0.012 * dt;
     roadSpeed = lerp(roadSpeed, targetSpeed, speedLerp);
@@ -874,13 +1111,29 @@ function loop(ts){
       const nb = hbox(npcDrawX, t.y, NPC_W, NPC_H);
       const exp = {l: nb.l-14, r: nb.r+14, t: nb.t, b: nb.b};
       if (overlaps(chb, exp) && !overlaps(chb, nb) && nearMissTimer <= 0){
-        nearMissTimer = 60; score += 2; scoreEl.textContent = score;
-        pops.push({x: npcDrawX + NPC_W/2, y: t.y, a: 1, t: 'CLOSE!', c: '#ffcc00'});
+        nearMissTimer = 60;
+        streak++; streakTimer = STREAK_TIMEOUT;
+        _gameMisses++;
+        const mult = getStreakMult();
+        const pts = 2 * mult;
+        score += pts; scoreEl.textContent = score;
+        const multLabel = mult > 1 ? ' \u00d7' + mult + '!' : '';
+        pops.push({x: npcDrawX + NPC_W/2, y: t.y, a: 1, t: 'CLOSE!' + multLabel, c: mult >= 4 ? '#ff3c3c' : mult >= 3 ? '#ff8c00' : '#ffcc00'});
         if (S.vibrateOn && navigator.vibrate) navigator.vibrate(30);
         playWhoosh();
+        updateStreakHUD();
+        checkAchievements();
       }
     }
     if (nearMissTimer > 0) nearMissTimer -= dt;
+
+    // Streak timeout — expires if no near-miss for STREAK_TIMEOUT frames
+    if (streakTimer > 0){
+      streakTimer -= dt;
+      if (streakTimer <= 0) resetStreak();
+    }
+    // Streak resets immediately on horn or brake (risky moves break the chain)
+    if (hornActive || brakeActive) resetStreak();
 
     // ── NPC–NPC collision (push apart) ──
     for (let i = 0; i < traffic.length; i++){
@@ -943,19 +1196,19 @@ function getAudioCtx(){
 }
 
 // ── RPM constants ──
-const RPM_IDLE   = 800;
+const RPM_IDLE   = 600;
 const RPM_CRUISE = 3000;
 const RPM_MAX    = 6500;
 function speedToRPM(spd, isBoost, isBrake){
   if (isBrake){
     // On brake: RPM drops toward a slightly raised idle (engine braking feel)
-    return Math.max(RPM_IDLE + 300, _currentRPM * 0.55);
+    return Math.max(RPM_IDLE + 100, _currentRPM * 0.55);
   }
   // Map road speed to RPM range — use a gentle curve so low speeds
   // don't produce an annoying buzz (idle is barely audible)
   const frac = Math.min(1, spd / (BASE_SPD * 2.5));
   const base  = RPM_IDLE + frac * (RPM_CRUISE - RPM_IDLE);
-  return isBoost ? Math.min(RPM_MAX, base * 1.85) : Math.min(RPM_MAX, base);
+  return isBoost ? Math.min(RPM_MAX, base * 1.3) : Math.min(RPM_MAX, base);
 }
 function rpmToRate(rpm){ return Math.max(0.25, rpm / 2200); }
 function rpmToHz(rpm) { return (rpm / 60) * 2; }  // 4-cyl: 2 firing events/rev
@@ -1075,7 +1328,12 @@ function stopEngine(){
   if (!eng) return;
   try {
     if (eng.src) eng.src.stop();
-    eng.synthNodes.forEach(n => n.osc.stop());
+    eng.synthNodes.forEach(n => { try { n.osc.stop(); } catch {} });
+    try { eng.masterGain.gain.cancelScheduledValues(0); eng.masterGain.disconnect(); } catch {}
+    try { eng.boostGain.gain.cancelScheduledValues(0);  eng.boostGain.disconnect();  } catch {}
+    try { eng.comp.disconnect();       } catch {}
+    try { eng.lp.frequency.cancelScheduledValues(0); eng.lp.disconnect(); } catch {}
+    try { if (eng.hp) eng.hp.disconnect(); } catch {}
   } catch {}
   eng = null;
 }
@@ -1105,9 +1363,9 @@ function updateEngineAudio(pct, isBoost, isBrake){
   }
   eng.synthNodes.forEach(n => {
     n.osc.frequency.linearRampToValueAtTime(freqHz * n.mult, now + 0.055);
-    // Quieter at idle, fuller at high rpm
-    const rpmFactor = Math.min(1, (_currentRPM - RPM_IDLE) / (RPM_CRUISE - RPM_IDLE));
-    n.g.gain.linearRampToValueAtTime(n.baseAmp * (0.45 + rpmFactor * 0.7), now + 0.08);
+    // Keep synth near-silent at idle — only open up as RPM rises past idle+400
+    const rpmFactor = Math.max(0, Math.min(1, (_currentRPM - (RPM_IDLE + 400)) / (RPM_CRUISE - RPM_IDLE)));
+    n.g.gain.linearRampToValueAtTime(n.baseAmp * (0.08 + rpmFactor * 0.85), now + 0.08);
   });
 
   // LP cutoff opens with RPM — more top-end at high revs
@@ -1115,8 +1373,8 @@ function updateEngineAudio(pct, isBoost, isBrake){
   eng.lp.frequency.linearRampToValueAtTime(lpFreq, now + 0.10);
 
   // Master volume
-  const vol = 0.52 + (pct / 100) * 0.22;
-  eng.masterGain.gain.linearRampToValueAtTime(isBoost ? vol + 0.18 : vol, now + 0.10);
+  const vol = 0.32 + (pct / 100) * 0.22;
+  eng.masterGain.gain.linearRampToValueAtTime(isBoost ? vol + 0.08 : vol, now + 0.10);
 }
 
 // Boost surge — pitch/gain spike + turbo hiss
@@ -1262,6 +1520,22 @@ $('home-from-go').addEventListener('click', goHome);
 $('lb-open-btn').addEventListener('click', openLeaderboard);
 $('lb-close-btn').addEventListener('click', () => showScreen('home'));
 
+// Stats screen
+const statsBtn = $('stats-open-btn');
+if (statsBtn) statsBtn.addEventListener('click', () => showScreen('stats'));
+const statsClose = $('stats-close-btn');
+if (statsClose) statsClose.addEventListener('click', () => showScreen('home'));
+
+// Achievements screen
+const achBtn = $('achievements-open-btn');
+if (achBtn) achBtn.addEventListener('click', () => showScreen('achievements'));
+const achClose = $('achievements-close-btn');
+if (achClose) achClose.addEventListener('click', () => showScreen('home'));
+
+// Daily challenge button
+const dailyBtn = $('daily-btn');
+if (dailyBtn) dailyBtn.addEventListener('click', openDailyChallenge);
+
 function openSettings(prev){
   applySettingsUI(); screenSettings.dataset.prev = prev || 'home'; showScreen('settings');
 }
@@ -1279,20 +1553,20 @@ $('lb-submit-btn').addEventListener('click', async () => {
   playerName = name;
   localStorage.setItem(LB_PLAYER_KEY, name);
   $('lb-submit-btn').disabled = true;
+  $('lb-submit-status').textContent = 'Looking up your score\u2026';
 
-  // Bind this name to the current IP
   await bindNameToIP(name);
 
-  // After binding, check if this name already has a higher score on the
-  // leaderboard (covers the "cleared site cache" scenario where the player
-  // re-enters their name and their IP may have changed).
+  // Fetch live data FIRST so lbData is populated, then recover score by name
+  try { await lbFetch(); } catch {}
   syncBestFromRemoteByName(name);
+  bestEl.textContent = best;
+  goBestEl.textContent = best;
 
-  // Build optimistic list immediately so player sees their rank right away
   const nameKey = name.toLowerCase();
   const base = lbData.length ? lbData : lbLoadCache();
-  const optimisticEntry = { name, score, ts: Date.now(), _optimistic: true, ip: clientIP || undefined };
-  // Filter out any existing entry for this IP (or name if no IP)
+  const submitScore = Math.max(score, best);
+  const optimisticEntry = { name, score: submitScore, ts: Date.now(), _optimistic: true, ip: clientIP || undefined };
   const withNew = [...base.filter(e => clientIP ? (e.ip ? e.ip !== clientIP : e.name.toLowerCase() !== nameKey) : e.name.toLowerCase() !== nameKey), optimisticEntry]
     .sort((a, b) => b.score - a.score).slice(0, MAX_LB_ENTRIES);
   lbSaveCache(withNew);
@@ -1306,8 +1580,7 @@ $('lb-submit-btn').addEventListener('click', async () => {
   }
   $('lb-entry-wrap').style.display = 'none';
 
-  // Push to server in background; update status when confirmed
-  lbPush(name, score).then(() => {
+  lbPush(name, submitScore).then(() => {
     lbData = lbData.map(e => e._optimistic ? { name: e.name, score: e.score, ts: e.ts, ip: e.ip } : e);
     lbSaveCache(lbData);
     const ri = renderLB(lbData, playerName);
@@ -1331,9 +1604,9 @@ document.addEventListener('pointercancel', () => { steerInput = 0; carVelX = 0; 
 $('btn-boost').addEventListener('pointerdown', e => {
   e.preventDefault();
   if (STATE !== 'playing') return;
-  boostActive = true; boostTimer = 2000;
+  boostActive = true; boostTimer = 4000;
   playBoostSurge();
-  showToast(boostToast, 400);
+  showToast(boostToast, 300);
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate(60);
 });
 $('btn-boost').addEventListener('pointerup', e => e.preventDefault());
@@ -1352,10 +1625,10 @@ if (brakeBtn){
 $('btn-horn').addEventListener('pointerdown', e => {
   e.preventDefault();
   if (STATE !== 'playing') return;
-  // No toast on horn — just play sound and trigger avoidance
+  _hornThisGame = true;
   playHorn();
   hornActive = true;
-  hornTimer = 1200;    // avoidance lasts ~1.2 seconds
+  hornTimer = 1000;    // avoidance lasts ~1.2 seconds
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate([15, 10, 20]);
 });
 
@@ -1368,7 +1641,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === ' ') STATE === 'playing' ? pauseGame() : STATE === 'paused' ? resumeGame() : null;
   else if (e.key === 'b' || e.key === 'B'){ boostActive = true; boostTimer = 1400; playBoostSurge(); }
   else if (e.key === 'h' || e.key === 'H'){
-    playHorn(); hornActive = true; hornTimer = 1200;
+    _hornThisGame = true; playHorn(); hornActive = true; hornTimer = 1200;
   }
 });
 document.addEventListener('keyup', e => {
@@ -1413,6 +1686,8 @@ applySettingsUI();
 showScreen('home');
 setHudVisible(false);
 drawSpeedometer(60);
+updateStreakHUD();
+renderAchievementsTab();
 lbFetch();
 
 // Pre-load IP, resolve player name, then sync best score from remote
