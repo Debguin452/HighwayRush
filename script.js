@@ -81,21 +81,52 @@ let boostActive = false, boostTimer = 0, brakeActive = false;
 let carYOffset = 0, carYOffsetTarget = 0;
 let traffic = [], particles = [], pops = [];
 let raf = null, lastTime = 0, spawnTimer = 0, deathTimer = 0, nearMissTimer = 0;
+let distancePx = 0;   // road pixels scrolled this game (1 px ≈ 0.05 m at chosen scale)
 
 // Horn avoidance state
 let hornActive = false, hornTimer = 0;
 
+/* ── BOOST COOLDOWN ───────────────────────────────────── */
+const BOOST_DURATION  = 3500;   // ms boost lasts
+const BOOST_COOLDOWN  = 8000;   // ms before boost is ready again
+let boostCooldown = 0;          // ms remaining on cooldown
+let boostCoolEl = null;         // cached arc element
+
+/* ── ROAD PERKS ───────────────────────────────────────── */
+// perk types: shield, magnet, slow, doubler
+const PERK_DEFS = {
+  shield:  { icon: '🛡️',  color: '#39ff8a', label: 'SHIELD',   dur: 5000 },
+  magnet:  { icon: '🧲',  color: '#ff8cff', label: 'MAGNET',   dur: 6000 },
+  slow:    { icon: '🌀',  color: '#00cfff', label: 'TIME SLOW', dur: 5000 },
+  doubler: { icon: '×2',  color: '#ffd700', label: '×2 SCORE', dur: 7000 },
+};
+let roadPerks = [];      // active perk tokens on road: {type, x, y, pulse}
+let activePerk = null;   // { type, expiresAt }
+let perkSpawnTimer = 0;
+const PERK_SPAWN_INTERVAL = 900; // frames between perk spawns
+
+/* ── NPC TYPES ────────────────────────────────────────── */
+// type: 'car' (default), 'truck', 'ambulance', 'police', 'motorbike'
+const NPC_TYPES = {
+  car:       { w:46, h:68, spdMult:1.0,  scoreBonus:0, hitMult:1.0, color:null },
+  truck:     { w:52, h:90, spdMult:0.55, scoreBonus:2, hitMult:1.0, color:'#8b4513' },
+  ambulance: { w:46, h:72, spdMult:0.80, scoreBonus:3, hitMult:1.0, color:'#fff' },
+  police:    { w:46, h:68, spdMult:1.35, scoreBonus:1, hitMult:1.0, color:'#1a1aff' },
+  motorbike: { w:24, h:52, spdMult:1.60, scoreBonus:0, hitMult:1.0, color:'#555' },
+};
+
 /* ── STREAK / COMBO ───────────────────────────────────── */
-let streak = 0, streakTimer = 0;          // consecutive near-misses
-const STREAK_TIMEOUT = 280;               // frames before streak expires (≈4.7s)
-const STREAK_THRESHOLDS = [2, 4, 7, 10];  // near-misses needed for ×2 ×3 ×4 ×5
+let streak = 0, streakTimer = 0;
+const STREAK_TIMEOUT = 280;
+// After 1st near-miss you're at ×2, 3rd=×3, 6th=×4, 9th=×5
+const STREAK_THRESHOLDS = [1, 3, 6, 9];
 
 /* ── SPEED LINES (boost FX) ──────────────────────────── */
 let speedLines = [];    // {x,y,len,alpha,speed} — drawn during boost
 
 /* ── PLAYER STATS (persist in localStorage) ──────────── */
 const STATS_KEY = 'hr_stats';
-let stats = { games: 0, distance: 0, bestStreak: 0, hornUsed: 0 };
+let stats = { games: 0, distance: 0, bestStreak: 0, hornUsed: 0, dailyCount: 0 };
 try { Object.assign(stats, JSON.parse(localStorage.getItem(STATS_KEY) || '{}')); } catch {}
 function saveStats(){ localStorage.setItem(STATS_KEY, JSON.stringify(stats)); }
 
@@ -106,13 +137,22 @@ try { achievements = JSON.parse(localStorage.getItem(ACHIEVEMENT_KEY) || '{}'); 
 function saveAchievements(){ localStorage.setItem(ACHIEVEMENT_KEY, JSON.stringify(achievements)); }
 
 const ACHIEVEMENT_DEFS = [
-  { id: 'first_blood',  label: '🩸 First Blood',    desc: 'Survive your first game',        check: () => stats.games >= 1               },
-  { id: 'speeder',      label: '⚡ Speeder',          desc: 'Reach level 5',                   check: () => level >= 5                     },
-  { id: 'zen',          label: '🧘 Zen Driver',       desc: 'Finish a game without using horn', check: () => stats.hornUsed === 0 && score >= 10 },
-  { id: 'ghost',        label: '👻 Ghost',            desc: '10 near-misses in one game',       check: () => _gameMisses >= 10              },
-  { id: 'combo_master', label: '🔥 Combo Master',     desc: 'Hit a ×4 streak multiplier',       check: () => streak >= 7                    },
-  { id: 'century',      label: '💯 Century',          desc: 'Score 100 in one game',            check: () => score >= 100                   },
-  { id: 'survivor',     label: '🛡️ Survivor',         desc: 'Play 10 games',                    check: () => stats.games >= 10              },
+  { id: 'first_blood',  label: '🩸 First Blood',      desc: 'Survive your first game',             check: () => stats.games >= 1                       },
+  { id: 'speeder',      label: '⚡ Speeder',            desc: 'Reach level 5',                       check: () => level >= 5                             },
+  { id: 'zen',          label: '🧘 Zen Driver',         desc: 'Finish a game (score≥10) without horn',check: () => !_hornThisGame && score >= 10          },
+  { id: 'ghost',        label: '👻 Ghost',              desc: '10 near-misses in one game',           check: () => _gameMisses >= 10                      },
+  { id: 'combo_master', label: '🔥 Combo Master',       desc: 'Hit a ×4 streak multiplier',           check: () => streak >= 6                            },
+  { id: 'century',      label: '💯 Century',            desc: 'Score 100 in one game',                check: () => score >= 100                           },
+  { id: 'survivor',     label: '🛡️ Survivor',           desc: 'Play 10 games',                        check: () => stats.games >= 10                      },
+  { id: 'veteran',      label: '🎖️ Veteran',            desc: 'Play 50 games',                        check: () => stats.games >= 50                      },
+  { id: 'road_warrior', label: '🏎️ Road Warrior',       desc: 'Travel 10 km total',                   check: () => stats.distance >= 10000                },
+  { id: 'marathon',     label: '🏃 Marathon',           desc: 'Travel 42 km total',                   check: () => stats.distance >= 42000                },
+  { id: 'level10',      label: '🚀 Top Gear',           desc: 'Reach level 10',                       check: () => level >= 10                            },
+  { id: 'near50',       label: '😤 Daredevil',          desc: '50 near-misses in one game',           check: () => _gameMisses >= 50                      },
+  { id: 'maxcombo',     label: '💥 Unstoppable',        desc: 'Hit ×5 streak multiplier',             check: () => streak >= 9                            },
+  { id: 'score500',     label: '🌟 High Roller',        desc: 'Score 500 in one game',                check: () => score >= 500                           },
+  { id: 'daily_done',   label: '📅 Daily Driver',       desc: 'Complete a daily challenge',           check: () => dailyState.done                        },
+  { id: 'daily_streak', label: '🗓️ Committed',          desc: 'Complete 7 different daily challenges',check: () => (stats.dailyCount || 0) >= 7           },
 ];
 let _gameMisses = 0;   // near-misses this game (for Ghost achievement)
 let _hornThisGame = false;
@@ -137,6 +177,7 @@ function makePRNG(seed){
 }
 let dailyMode = false;
 let dailyRng  = null;
+const DAILY_TARGET_SCORE = 50;   // target score for daily challenge badge
 
 bestEl.textContent = best;
 
@@ -554,7 +595,9 @@ function startGame(){
   carYOffset = 0; carYOffsetTarget = 0; carTilt = 0; carTiltTarget = 0;
   roadY = 0; lastTime = 0; spawnTimer = 0; deathTimer = 0;
   boostActive = false; boostTimer = 0; brakeActive = false; nearMissTimer = 0;
-  hornActive = false; hornTimer = 0;
+  hornActive = false; hornTimer = 0; distancePx = 0;
+  roadPerks = []; activePerk = null; perkSpawnTimer = 0;
+  boostCooldown = 0; updateBoostArc(1);
   streak = 0; streakTimer = 0; _gameMisses = 0; _hornThisGame = false;
   speedoNeedle = 60;
   scoreEl.textContent = '0'; levelEl.textContent = '1';
@@ -582,9 +625,11 @@ async function doGameOver(){
 
   // ── Update persistent stats ──
   stats.games++;
-  stats.distance += Math.round(score * 18);   // rough metres per point
+  // 1 screen height (520px) ≈ 60 metres at a reasonable highway scale
+  const metresThisGame = Math.round((distancePx / GH_BASE) * 60);
+  stats.distance += metresThisGame;
   if (streak > stats.bestStreak) stats.bestStreak = streak;
-  if (!_hornThisGame) stats.hornUsed = 0; else stats.hornUsed++;
+  if (_hornThisGame) stats.hornUsed = (stats.hornUsed || 0) + 1;
   saveStats();
 
   // ── Check achievements before showing screen ──
@@ -603,6 +648,11 @@ async function doGameOver(){
   goBestEl.textContent  = best;
   goLevelEl.textContent = level;
   newBestBadge.hidden   = !isNew;
+
+  const goDistEl = $('go-distance');
+  if (goDistEl) goDistEl.textContent = metresThisGame >= 1000
+    ? (metresThisGame / 1000).toFixed(2) + ' km'
+    : metresThisGame + ' m';
   setHudVisible(false);
   showScreen('gameover');
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate([80, 40, 80]);
@@ -709,6 +759,154 @@ function levelUp(){
   level++; roadSpeed += 0.25; levelEl.textContent = level; showToast(levelToast, 300);
 }
 
+/* ── BOOST ARC ────────────────────────────────────────── */
+function updateBoostArc(fraction){
+  if (!boostCoolEl) boostCoolEl = document.getElementById('boost-arc-fill');
+  if (!boostCoolEl) return;
+  const circ = 2 * Math.PI * 18;   // r=18 → circumference ≈ 113
+  const dash = circ * fraction;
+  boostCoolEl.style.strokeDashoffset = circ - dash;
+  boostCoolEl.classList.toggle('active', fraction >= 1);
+  const btn = document.getElementById('btn-boost');
+  if (btn){
+    btn.classList.toggle('boost-ready', fraction >= 1);
+    btn.classList.toggle('boost-cooling', fraction < 1);
+  }
+}
+
+/* ── PERK HELPERS ─────────────────────────────────────── */
+function spawnPerk(){
+  if (roadPerks.length >= 2) return;
+  const types = Object.keys(PERK_DEFS);
+  const type = types[Math.floor(Math.random() * types.length)];
+  const x = 20 + Math.random() * (GW - 50);
+  roadPerks.push({ type, x, y: -30, pulse: 0 });
+}
+
+function collectPerk(type){
+  const def = PERK_DEFS[type];
+  activePerk = { type, expiresAt: Date.now() + def.dur };
+  const perkHud = document.getElementById('perk-hud');
+  if (perkHud){ perkHud.textContent = def.icon; perkHud.classList.add('active'); }
+  pops.push({ x: GW/2, y: GH_BASE * 0.4, a: 1.3, t: def.label + '!', c: def.color });
+  if (S.vibrateOn && navigator.vibrate) navigator.vibrate([20, 10, 30]);
+}
+
+function clearPerk(){
+  activePerk = null;
+  const perkHud = document.getElementById('perk-hud');
+  if (perkHud) perkHud.classList.remove('active');
+}
+
+function isPerkActive(type){ return activePerk && activePerk.type === type && Date.now() < activePerk.expiresAt; }
+
+function drawPerks(){
+  roadPerks.forEach(p => {
+    const def = PERK_DEFS[p.type];
+    p.pulse = (p.pulse || 0) + 0.08;
+    const glow = 0.7 + 0.3 * Math.sin(p.pulse);
+    ctx.save();
+    // outer glow ring
+    ctx.globalAlpha = 0.35 * glow;
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(p.x + 16, p.y + 16, 19 + Math.sin(p.pulse) * 3, 0, Math.PI*2); ctx.stroke();
+    // filled circle
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = def.color;
+    ctx.beginPath(); ctx.arc(p.x + 16, p.y + 16, 16, 0, Math.PI*2); ctx.fill();
+    // icon
+    ctx.globalAlpha = glow;
+    ctx.font = p.type === 'doubler' ? "bold 13px 'Orbitron',monospace" : '18px serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (p.type === 'doubler'){ ctx.fillStyle = def.color; ctx.fillText('×2', p.x + 16, p.y + 17); }
+    else ctx.fillText(def.icon, p.x + 16, p.y + 17);
+    ctx.restore();
+  });
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+}
+
+/* ── NPC TYPE HELPERS ────────────────────────────────── */
+function pickNPCType(lvl){
+  const r = Math.random();
+  if (lvl < 2) return 'car';
+  if (lvl < 3){ return r < 0.12 ? 'truck' : r < 0.18 ? 'motorbike' : 'car'; }
+  if (lvl < 5){ return r < 0.12 ? 'truck' : r < 0.22 ? 'motorbike' : r < 0.28 ? 'ambulance' : 'car'; }
+  return r < 0.10 ? 'truck' : r < 0.22 ? 'motorbike' : r < 0.30 ? 'ambulance' : r < 0.38 ? 'police' : 'car';
+}
+
+// Draw a single NPC, handling special visuals for each type
+function drawNPC(t){
+  const def = NPC_TYPES[t.npcType] || NPC_TYPES.car;
+  const drawX = t.x + (t.dodgeOffsetX || 0);
+  const npcTilt = t.dodgeTilt || 0;
+
+  ctx.save();
+  if (Math.abs(npcTilt) > 0.005){
+    ctx.translate(drawX + def.w/2, t.y + def.h * 0.5);
+    ctx.rotate(npcTilt);
+    ctx.translate(-def.w/2, -def.h*0.5);
+  } else {
+    ctx.translate(drawX, t.y);
+  }
+
+  if (t.npcType === 'truck'){
+    // Truck: dark cab + long body
+    ctx.fillStyle = '#3a2a1a'; ctx.fillRect(0, 0, def.w, def.h);
+    ctx.fillStyle = '#8b4513'; ctx.fillRect(3, def.h*0.55, def.w-6, def.h*0.42);
+    ctx.fillStyle = 'rgba(255,220,100,0.6)'; ctx.fillRect(4, 2, def.w-8, 8); // headlights
+    ctx.fillStyle = '#222'; ctx.fillRect(6, 10, def.w-12, def.h*0.42); // windscreen
+    // wheels
+    ctx.fillStyle = '#111'; ctx.fillRect(-3, def.h*0.1, 5, 14); ctx.fillRect(def.w-2, def.h*0.1, 5, 14);
+    ctx.fillRect(-3, def.h*0.55, 5, 14); ctx.fillRect(def.w-2, def.h*0.55, 5, 14);
+
+  } else if (t.npcType === 'ambulance'){
+    // White body with red cross
+    ctx.fillStyle = '#eee'; ctx.fillRect(0, 0, def.w, def.h);
+    ctx.fillStyle = '#cc0000';
+    ctx.fillRect(def.w/2-3, def.h*0.25, 6, 16); ctx.fillRect(def.w/2-8, def.h*0.30, 16, 6);
+    ctx.fillStyle = '#222'; ctx.fillRect(4, 4, def.w-8, def.h*0.28);
+    // Flashing lights
+    const flash = Math.sin(Date.now() / 150) > 0;
+    ctx.fillStyle = flash ? '#ff2020' : '#2020ff';
+    ctx.beginPath(); ctx.arc(def.w*0.3, 3, 4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = flash ? '#2020ff' : '#ff2020';
+    ctx.beginPath(); ctx.arc(def.w*0.7, 3, 4, 0, Math.PI*2); ctx.fill();
+
+  } else if (t.npcType === 'police'){
+    // Black and white police car
+    const half = Math.sin(Date.now()/80) > 0;
+    ctx.fillStyle = half ? '#fff' : '#111'; ctx.fillRect(0, 0, def.w/2, def.h);
+    ctx.fillStyle = half ? '#111' : '#fff'; ctx.fillRect(def.w/2, 0, def.w/2, def.h);
+    ctx.fillStyle = '#222'; ctx.fillRect(4, 4, def.w-8, def.h*0.30);
+    // Siren lights
+    ctx.fillStyle = half ? '#ff0000' : '#0000ff';
+    ctx.beginPath(); ctx.arc(def.w*0.35, 4, 5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = half ? '#0000ff' : '#ff0000';
+    ctx.beginPath(); ctx.arc(def.w*0.65, 4, 5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,0,0.7)'; ctx.fillRect(8, def.h-10, 6, 6); ctx.fillRect(def.w-14, def.h-10, 6, 6);
+
+  } else if (t.npcType === 'motorbike'){
+    // Slim motorbike shape
+    ctx.fillStyle = '#444'; ctx.fillRect(def.w*0.2, def.h*0.05, def.w*0.6, def.h*0.55);
+    ctx.fillStyle = '#222'; ctx.beginPath();
+    ctx.ellipse(def.w/2, def.h*0.18, def.w*0.32, def.h*0.12, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#666'; ctx.fillRect(def.w*0.25, def.h*0.55, def.w*0.5, def.h*0.38);
+    // Wheels (circles)
+    ctx.strokeStyle = '#888'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(def.w/2, def.h*0.12, def.w*0.28, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(def.w/2, def.h*0.82, def.w*0.28, 0, Math.PI*2); ctx.stroke();
+    // Headlight
+    ctx.fillStyle = 'rgba(255,220,100,0.9)';
+    ctx.beginPath(); ctx.arc(def.w/2, 3, 3, 0, Math.PI*2); ctx.fill();
+
+  } else {
+    // Normal car — use image
+    ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, 0, 0, def.w, def.h);
+  }
+  ctx.restore();
+}
+
 /* ── STREAK HELPERS ──────────────────────────────────── */
 function getStreakMult(){
   // Returns 1, 2, 3, 4 or 5 based on streak count
@@ -780,11 +978,17 @@ function renderAchievementsTab(){
 function renderStatsScreen(){
   const el = $('stats-body');
   if (!el) return;
+  const dist = stats.distance || 0;
+  const distStr = dist >= 1000 ? (dist / 1000).toFixed(1) + ' km' : dist + ' m';
+  const todaySeed = getTodaySeed();
+  const dailyBest = (dailyState.seed === todaySeed && dailyState.done) ? dailyState.score : '—';
   el.innerHTML = `
     <div class="stat-row"><span class="stat-lbl">Games Played</span><span class="stat-val">${stats.games}</span></div>
-    <div class="stat-row"><span class="stat-lbl">Total Distance</span><span class="stat-val">${(stats.distance/1000).toFixed(1)} km</span></div>
-    <div class="stat-row"><span class="stat-lbl">Best Score</span><span class="stat-val">${best}</span></div>
+    <div class="stat-row"><span class="stat-lbl">Total Distance</span><span class="stat-val">${distStr}</span></div>
+    <div class="stat-row"><span class="stat-lbl">All-Time Best</span><span class="stat-val">${best}</span></div>
+    <div class="stat-row"><span class="stat-lbl">Today's Best</span><span class="stat-val">${dailyBest}</span></div>
     <div class="stat-row"><span class="stat-lbl">Best Streak</span><span class="stat-val">${stats.bestStreak} misses</span></div>
+    <div class="stat-row"><span class="stat-lbl">Daily Challenges</span><span class="stat-val">${stats.dailyCount || 0}</span></div>
     <div class="stat-row"><span class="stat-lbl">Achievements</span><span class="stat-val">${Object.keys(achievements).length} / ${ACHIEVEMENT_DEFS.length}</span></div>
   `;
 }
@@ -804,14 +1008,26 @@ function finishDailyChallenge(){
   dailyMode = false;
   const seed = getTodaySeed();
   const prev = (dailyState.seed === seed) ? dailyState.score : 0;
-  if (score > prev){
+  const isNewDailyBest = score > prev;
+  if (isNewDailyBest){
     dailyState = { seed, done: true, score };
     localStorage.setItem(DAILY_KEY, JSON.stringify(dailyState));
+  } else if (!dailyState.done || dailyState.seed !== seed) {
+    dailyState = { seed, done: true, score: prev };
+    localStorage.setItem(DAILY_KEY, JSON.stringify(dailyState));
   }
+  // Count unique days completed
+  const prevCount = stats.dailyCount || 0;
+  stats.dailyCount = prevCount + 1;
+  saveStats();
+
   const badge = $('go-daily-badge');
   if (badge){
     badge.hidden = false;
-    badge.textContent = score > prev ? '\uD83C\uDFC6 Daily Best: ' + score : 'Daily Score: ' + score;
+    const reached = score >= DAILY_TARGET_SCORE;
+    badge.textContent = isNewDailyBest
+      ? '📅 Daily Best: ' + score + (reached ? ' 🏆' : '')
+      : '📅 Daily Score: ' + score + ' (Best: ' + dailyState.score + ')';
   }
 }
 
@@ -864,34 +1080,37 @@ function getHornDodgeFactor(npcX, npcY, carDrawY){
 /* ── SPAWN ───────────────────────────────────────────── */
 function spawnNPC(){
   const lane = Math.floor(Math.random() * LANE_X.length);
-  if (traffic.some(t => t.lane === lane && t.y < SAFE_GAP)) return;
-  // NPC speed: an absolute component so they always look fast, plus a relative
-  // component that scales up with level. At launch roadSpeed is near 0 so we
-  // use Math.max to ensure a floor — NPCs are never "parked".
-  const absFloor = BASE_SPD * 0.25;                       // always at least this fast — never look parked
-  const relBonus = 0.6 + Math.random() * 1.0;            // extra variation
-  const effectiveRoad = Math.max(BASE_SPD, roadSpeed);   // treat road as full speed for NPC calc
-  const spdRel = relBonus * (effectiveRoad / BASE_SPD);
-  const spdAbs = Math.max(absFloor, spdRel);             // absolute floor
+  const npcType = pickNPCType(level);
+  const def = NPC_TYPES[npcType];
+  if (traffic.some(t => t.lane === lane && t.y < SAFE_GAP + (def.h - 68))) return;
+  const absFloor = BASE_SPD * 0.25;
+  const relBonus = 0.6 + Math.random() * 1.0;
+  const effectiveRoad = Math.max(BASE_SPD, roadSpeed);
+  const spdRel = Math.max(absFloor, relBonus * (effectiveRoad / BASE_SPD) * def.spdMult);
   traffic.push({
-    lane, x: LANE_X[lane] - NPC_W/2, y: -NPC_H,
-    spdRel: spdAbs, imgIdx: Math.floor(Math.random() * npcImgs.length),
-    dodgeVelX: 0, dodgeOffsetX: 0                // for horn avoidance
+    lane, x: LANE_X[lane] - def.w/2, y: -def.h,
+    npcType, spdRel, imgIdx: Math.floor(Math.random() * npcImgs.length),
+    dodgeVelX: 0, dodgeOffsetX: 0, policeChase: npcType === 'police',
+    zigzagTimer: npcType === 'motorbike' ? Math.random() * 60 : 0,
   });
   if (level >= 2 && Math.random() < 0.20){
     const lane2 = (lane + 1 + Math.floor(Math.random() * 2)) % LANE_X.length;
-    const spdRel2 = Math.max(absFloor, (0.6 + Math.random() * 1.0) * (effectiveRoad / BASE_SPD));
+    const npcType2 = pickNPCType(level);
+    const def2 = NPC_TYPES[npcType2];
+    const spdRel2 = Math.max(absFloor, (0.6 + Math.random() * 1.0) * (effectiveRoad / BASE_SPD) * def2.spdMult);
     if (!traffic.some(t => t.lane === lane2 && t.y < SAFE_GAP))
       traffic.push({
-        lane: lane2, x: LANE_X[lane2] - NPC_W/2, y: -NPC_H - 30,
-        spdRel: spdRel2, imgIdx: Math.floor(Math.random() * npcImgs.length),
-        dodgeVelX: 0, dodgeOffsetX: 0
+        lane: lane2, x: LANE_X[lane2] - def2.w/2, y: -def2.h - 30,
+        npcType: npcType2, spdRel: spdRel2, imgIdx: Math.floor(Math.random() * npcImgs.length),
+        dodgeVelX: 0, dodgeOffsetX: 0, policeChase: npcType2 === 'police',
+        zigzagTimer: npcType2 === 'motorbike' ? Math.random() * 60 : 0,
       });
   }
 }
 
 /* ── COLLISION HELPERS ───────────────────────────────── */
 function hbox(x, y, w, h){ return {l: x+HITPAD, r: x+w-HITPAD, t: y+HITPAD, b: y+h-HITPAD}; }
+function npcBox(t){ const def = NPC_TYPES[t.npcType]||NPC_TYPES.car; return hbox(t.x+(t.dodgeOffsetX||0), t.y, def.w, def.h); }
 function overlaps(a, b){ return !(a.b < b.t || a.t > b.b || a.r < b.l || a.l > b.r); }
 function lerp(a, b, t){ return a + (b - a) * t; }
 
@@ -922,19 +1141,9 @@ function draw(){
     ctx.fillStyle = '#1a1a1f'; ctx.fillRect(0, 0, GW, GH_BASE);
   }
 
-  traffic.forEach(t => {
-    const drawX = t.x + (t.dodgeOffsetX || 0);
-    const npcTilt = t.dodgeTilt || 0;
-    if (Math.abs(npcTilt) > 0.005){
-      ctx.save();
-      ctx.translate(drawX + NPC_W/2, t.y + NPC_H * 0.5);
-      ctx.rotate(npcTilt);
-      ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, -NPC_W/2, -NPC_H*0.5, NPC_W, NPC_H);
-      ctx.restore();
-    } else {
-      ctx.drawImage(npcImgs[t.imgIdx], 0, 0, 120, 120, drawX, t.y, NPC_W, NPC_H);
-    }
-  });
+  traffic.forEach(t => { drawNPC(t); });
+
+  drawPerks();
 
   const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
 
@@ -1007,6 +1216,7 @@ function loop(ts){
 
   if (STATE === 'playing'){
     roadY += roadSpeed * dt;
+    distancePx += roadSpeed * dt;
     const eff = steerInput !== 0 ? steerInput : (S.gyroOn ? gyroSteer : 0);
 
     if (boostActive){ boostTimer -= dt * 16.667; if (boostTimer <= 0) boostActive = false; }
@@ -1055,70 +1265,133 @@ function loop(ts){
     const carDrawY = GH_BASE - CAR_H - CAR_BASE_Y_OFFSET - carYOffset;
     const chb = hbox(carX, carDrawY, CAR_W, CAR_H);
 
+    // ── Perk pickup & expiry ──
+    if (activePerk && Date.now() >= activePerk.expiresAt) clearPerk();
+
+    // ── Boost cooldown tick ──
+    if (!boostActive && boostCooldown > 0){
+      boostCooldown -= dt * 16.667;
+      if (boostCooldown < 0) boostCooldown = 0;
+      updateBoostArc(1 - boostCooldown / BOOST_COOLDOWN);
+    }
+
+    // ── Road perk movement & player pickup ──
+    const perkPickupR = 24;
+    for (let i = roadPerks.length - 1; i >= 0; i--){
+      const p = roadPerks[i];
+      p.y += (Math.max(BASE_SPD*0.5, roadSpeed)) * dt;
+      if (p.y > GH_BASE + 32){ roadPerks.splice(i, 1); continue; }
+      const px = p.x + 16, py = p.y + 16;
+      const carCX = carX + CAR_W/2, carCY = carDrawY + CAR_H/2;
+      if (Math.hypot(px - carCX, py - carCY) < perkPickupR + 16){
+        collectPerk(p.type); roadPerks.splice(i, 1);
+      }
+    }
+
+    perkSpawnTimer += dt;
+    if (perkSpawnTimer >= PERK_SPAWN_INTERVAL){ spawnPerk(); perkSpawnTimer = 0; }
+
     // ── NPC update ──
     for (let i = traffic.length - 1; i >= 0; i--){
       const t = traffic[i];
-      // NPC moves at its own absolute speed (spdRel already has a floor baked in
-      // from spawnNPC) PLUS the road scroll so they feel embedded in the world.
-      // We use Math.max so that even at game-start when roadSpeed ≈ 0 the NPC
-      // visually moves at a meaningful pace (floor = BASE_SPD * 1.0).
-      const npcMove = Math.max(BASE_SPD*0.5, roadSpeed) + t.spdRel;
+      const def = NPC_TYPES[t.npcType] || NPC_TYPES.car;
+      const slowFactor = isPerkActive('slow') ? 0.35 : 1;
+      const npcMove = (Math.max(BASE_SPD*0.5, roadSpeed) + t.spdRel) * slowFactor;
       t.y += npcMove * dt;
 
-      // Horn avoidance — nearer NPCs dodge with gentle acceleration and visible tilt
+      // Motorbike zigzag behaviour
+      if (t.npcType === 'motorbike'){
+        t.zigzagTimer = (t.zigzagTimer || 0) + dt;
+        if (t.zigzagTimer > 45 + Math.random() * 30){
+          t.dodgeVelX = (Math.random() < 0.5 ? -1 : 1) * (1.5 + Math.random() * 2);
+          t.zigzagTimer = 0;
+        }
+      }
+
+      // Police chases player X position
+      if (t.npcType === 'police' && t.y > 0 && t.y < GH_BASE * 0.7){
+        const carCX = carX + CAR_W/2, polCX = t.x + (t.dodgeOffsetX||0) + def.w/2;
+        const chaseDir = carCX > polCX ? 1 : -1;
+        t.dodgeVelX = lerp(t.dodgeVelX||0, chaseDir * 1.8, 0.04 * dt);
+      }
+
+      // Horn avoidance
       if (hornActive){
         const dodge = getHornDodgeFactor(t.x + (t.dodgeOffsetX||0), t.y, carDrawY);
         if (dodge > 0){
           const carCenterX = carX + CAR_W/2;
-          const npcCenterX = t.x + (t.dodgeOffsetX||0) + NPC_W/2;
+          const npcCenterX = t.x + (t.dodgeOffsetX||0) + def.w/2;
           const dir = npcCenterX > carCenterX ? 1 : -1;
           t.dodgeVelX = lerp(t.dodgeVelX || 0, dir * dodge * 2.8 * (roadSpeed / BASE_SPD), 0.045 * dt);
         }
-      } else {
-        // Slower return-to-lane (was 0.025, now 0.010) — car eases back gradually
+      } else if (t.npcType !== 'motorbike' && t.npcType !== 'police'){
         t.dodgeVelX = lerp(t.dodgeVelX || 0, 0, 0.01 * dt);
       }
       t.dodgeOffsetX = (t.dodgeOffsetX || 0) + (t.dodgeVelX || 0) * dt;
-      // NPC tilt proportional to dodge velocity — looks like the car is actually swerving
       const MAX_NPC_TILT = -0.18;
       t.dodgeTilt = lerp(t.dodgeTilt || 0, (t.dodgeVelX || 0) / (2.8 * 1.5) * MAX_NPC_TILT, 0.08 * dt);
-      // Clamp dodge so NPC stays on road
       const rawX = t.x + t.dodgeOffsetX;
       if (rawX < 0) t.dodgeOffsetX = -t.x;
-      if (rawX + NPC_W > GW) t.dodgeOffsetX = GW - NPC_W - t.x;
+      if (rawX + def.w > GW) t.dodgeOffsetX = GW - def.w - t.x;
 
-      if (t.y > GH_BASE + NPC_H){
-        traffic.splice(i, 1); score++;
+      // Magnet perk: pull nearby NPC off road for bonus
+      if (isPerkActive('magnet')){
+        const npcCX = t.x + (t.dodgeOffsetX||0) + def.w/2;
+        const npcCY = t.y + def.h/2;
+        if (Math.hypot(npcCX - (carX+CAR_W/2), npcCY - (carDrawY+CAR_H/2)) < 90){
+          t.y += 8 * dt; // pull them off screen faster
+        }
+      }
+
+      if (t.y > GH_BASE + def.h){
+        traffic.splice(i, 1);
+        const mult = getStreakMult();
+        const doublerOn = isPerkActive('doubler');
+        const baseScore = t.npcType === 'truck' ? 2 : t.npcType === 'ambulance' ? 3 : 1;
+        const pts = baseScore * mult * (doublerOn ? 2 : 1);
+        score += pts;
         scoreEl.textContent = score;
-        pops.push({x: t.x + NPC_W/2, y: GH_BASE - 50, a: 1, t: '+1', c: '#fff'});
+        const label = (mult > 1 || doublerOn) ? '+' + pts + (mult > 1 ? ' \u00d7'+mult : '') + (doublerOn ? ' \u00d72' : '') : '+' + baseScore;
+        pops.push({x: t.x + def.w/2, y: GH_BASE - 50, a: 1, t: label,
+          c: doublerOn ? '#ffd700' : mult > 1 ? '#39ff8a' : '#fff'});
         if (score % 12 === 0) levelUp();
         continue;
       }
 
-      // Car–NPC collision
-      const npcDrawX = t.x + (t.dodgeOffsetX || 0);
-      if (overlaps(chb, hbox(npcDrawX, t.y, NPC_W, NPC_H))){
-        spawnExplosion(carX + CAR_W/2, carDrawY + CAR_H/2);
-        STATE = 'dying'; deathTimer = 520;
-        stopEngine();
-        playCrash();
-        gc.classList.add('shake');
-        setTimeout(() => gc.classList.remove('shake'), 400);
-        break;
+      // Car–NPC collision — shield absorbs it
+      const nb = npcBox(t);
+      if (overlaps(chb, nb)){
+        if (isPerkActive('shield')){
+          // Shield: bounce NPC off, lose shield
+          t.dodgeVelX = (t.x < carX ? -4 : 4);
+          t.y -= 12;
+          clearPerk();
+          pops.push({x: carX+CAR_W/2, y: carDrawY-20, a: 1.5, t: 'SHIELD!', c:'#39ff8a'});
+          if (S.vibrateOn && navigator.vibrate) navigator.vibrate([10,5,10]);
+        } else {
+          spawnExplosion(carX + CAR_W/2, carDrawY + CAR_H/2);
+          STATE = 'dying'; deathTimer = 520;
+          stopEngine(); playCrash();
+          gc.classList.add('shake');
+          setTimeout(() => gc.classList.remove('shake'), 400);
+          break;
+        }
       }
 
-      // Car–Car near miss
-      const nb = hbox(npcDrawX, t.y, NPC_W, NPC_H);
+      // Near miss — use expanded box
       const exp = {l: nb.l-14, r: nb.r+14, t: nb.t, b: nb.b};
       if (overlaps(chb, exp) && !overlaps(chb, nb) && nearMissTimer <= 0){
         nearMissTimer = 60;
         streak++; streakTimer = STREAK_TIMEOUT;
         _gameMisses++;
         const mult = getStreakMult();
-        const pts = 2 * mult;
+        const doublerOn = isPerkActive('doubler');
+        const pts = 3 * mult * (doublerOn ? 2 : 1);
         score += pts; scoreEl.textContent = score;
         const multLabel = mult > 1 ? ' \u00d7' + mult + '!' : '';
-        pops.push({x: npcDrawX + NPC_W/2, y: t.y, a: 1, t: 'CLOSE!' + multLabel, c: mult >= 4 ? '#ff3c3c' : mult >= 3 ? '#ff8c00' : '#ffcc00'});
+        pops.push({x: nb.l + (nb.r-nb.l)/2, y: t.y, a: 1,
+          t: 'CLOSE! +' + pts + multLabel,
+          c: mult >= 4 ? '#ff3c3c' : mult >= 3 ? '#ff8c00' : '#ffcc00'});
         if (S.vibrateOn && navigator.vibrate) navigator.vibrate(30);
         playWhoosh();
         updateStreakHUD();
@@ -1127,34 +1400,30 @@ function loop(ts){
     }
     if (nearMissTimer > 0) nearMissTimer -= dt;
 
-    // Streak timeout — expires if no near-miss for STREAK_TIMEOUT frames
     if (streakTimer > 0){
       streakTimer -= dt;
       if (streakTimer <= 0) resetStreak();
     }
-    // Streak resets immediately on horn or brake (risky moves break the chain)
     if (hornActive || brakeActive) resetStreak();
 
-    // ── NPC–NPC collision (push apart) ──
+    // ── NPC–NPC push apart ──
     for (let i = 0; i < traffic.length; i++){
       for (let j = i + 1; j < traffic.length; j++){
         const a = traffic[i], b = traffic[j];
+        const da = NPC_TYPES[a.npcType]||NPC_TYPES.car, db = NPC_TYPES[b.npcType]||NPC_TYPES.car;
         const ax = a.x + (a.dodgeOffsetX || 0), bx = b.x + (b.dodgeOffsetX || 0);
-        const aBox = hbox(ax, a.y, NPC_W, NPC_H);
-        const bBox = hbox(bx, b.y, NPC_W, NPC_H);
+        const aBox = hbox(ax, a.y, da.w, da.h);
+        const bBox = hbox(bx, b.y, db.w, db.h);
         if (overlaps(aBox, bBox)){
           const push = 1.5;
           a.dodgeOffsetX = (a.dodgeOffsetX||0) + (ax < bx ? -push : push);
           b.dodgeOffsetX = (b.dodgeOffsetX||0) + (bx < ax ? -push : push);
-          // Slow down the faster one slightly
-          if (a.spdRel > b.spdRel) a.spdRel *= 0.98;
-          else b.spdRel *= 0.98;
+          if (a.spdRel > b.spdRel) a.spdRel *= 0.98; else b.spdRel *= 0.98;
         }
       }
     }
 
     spawnTimer += dt * 16.667;
-    // Spawn interval also scales with speed — faster = more frequent
     const spawnInterval = Math.max(300, SPAWN_MS - (level-1)*40 - (roadSpeed - BASE_SPD)*15);
     if (spawnTimer >= spawnInterval){ spawnNPC(); spawnTimer = 0; }
     updateHUD();
@@ -1604,7 +1873,10 @@ document.addEventListener('pointercancel', () => { steerInput = 0; carVelX = 0; 
 $('btn-boost').addEventListener('pointerdown', e => {
   e.preventDefault();
   if (STATE !== 'playing') return;
-  boostActive = true; boostTimer = 4000;
+  if (boostCooldown > 0) return;   // on cooldown — blocked
+  boostActive = true; boostTimer = BOOST_DURATION;
+  boostCooldown = BOOST_COOLDOWN;
+  updateBoostArc(0);
   playBoostSurge();
   showToast(boostToast, 300);
   if (S.vibrateOn && navigator.vibrate) navigator.vibrate(60);
@@ -1637,9 +1909,9 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft')       steerInput = -1;
   else if (e.key === 'ArrowRight') steerInput = 1;
   else if (e.key === 'ArrowDown')  brakeActive = true;
-  else if (e.key === 'ArrowUp'){ boostActive = true; boostTimer = 1400; playBoostSurge(); }
+  else if (e.key === 'ArrowUp' && boostCooldown <= 0){ boostActive = true; boostTimer = BOOST_DURATION; boostCooldown = BOOST_COOLDOWN; updateBoostArc(0); playBoostSurge(); }
+  else if ((e.key === 'b' || e.key === 'B') && boostCooldown <= 0){ boostActive = true; boostTimer = BOOST_DURATION; boostCooldown = BOOST_COOLDOWN; updateBoostArc(0); playBoostSurge(); }
   else if (e.key === ' ') STATE === 'playing' ? pauseGame() : STATE === 'paused' ? resumeGame() : null;
-  else if (e.key === 'b' || e.key === 'B'){ boostActive = true; boostTimer = 1400; playBoostSurge(); }
   else if (e.key === 'h' || e.key === 'H'){
     _hornThisGame = true; playHorn(); hornActive = true; hornTimer = 1200;
   }
