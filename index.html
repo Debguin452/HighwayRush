@@ -17,13 +17,15 @@
 <div id="app">
   <canvas id="gc"></canvas>
 
+  <!-- HUD -->
   <div id="hud">
     <div id="hud-left">
       <div class="hud-label">SCORE</div>
       <div id="score-val">0</div>
     </div>
-    <div id="hud-center">
+    <div id="hud-mid-col">
       <button id="pause-btn" aria-label="Pause">⏸</button>
+      <div id="hud-dist-wrap"><span id="hud-dist">0 m</span></div>
     </div>
     <div id="hud-speedo">
       <canvas id="speedo-canvas" width="54" height="54"></canvas>
@@ -33,12 +35,21 @@
       <div id="level-val">1</div>
     </div>
     <div id="streak-display"></div>
+    <div id="perk-hud"></div>
   </div>
 
+  <!-- CONTROLS -->
   <div id="controls">
     <button id="btn-left"  aria-label="Left">◀</button>
     <div id="mid-btns">
-      <button id="btn-boost" aria-label="Boost">⚡</button>
+      <button id="btn-boost" aria-label="Boost">
+        <svg class="boost-arc" viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg">
+          <circle class="boost-track" cx="22" cy="22" r="18"/>
+          <circle class="boost-fill" cx="22" cy="22" r="18" id="boost-arc-fill"/>
+        </svg>
+        <span class="btn-icon">⚡</span>
+        <span class="boost-cd-label" id="boost-cd-label"></span>
+      </button>
       <button id="btn-horn"  aria-label="Horn">📯</button>
       <button id="btn-brake" aria-label="Brake">🛑</button>
     </div>
@@ -50,12 +61,18 @@
     <div class="screen-inner">
       <div id="logo">HIGHWAY<span>RUSH</span></div>
       <div id="best-display"><span class="lbl">BEST</span><span id="best-score">0</span></div>
-      <button class="big-btn" id="play-btn">PLAY</button>
-      <button class="big-btn daily-btn-style" id="daily-btn">📅 DAILY CHALLENGE</button>
-      <button class="small-btn" id="lb-open-btn">🏆 LEADERBOARD</button>
-      <button class="small-btn" id="stats-open-btn">📊 MY STATS</button>
-      <button class="small-btn" id="achievements-open-btn">🎖 ACHIEVEMENTS</button>
-      <button class="small-btn" id="settings-open-btn">⚙ SETTINGS</button>
+      <div id="home-btn-grid">
+        <button class="home-btn primary" id="play-btn">▶ PLAY</button>
+        <button class="home-btn secondary" id="daily-btn">📅 DAILY CHALLENGE</button>
+        <div class="home-btn-row">
+          <button class="home-btn small" id="lb-open-btn">🏆 RANKS</button>
+          <button class="home-btn small" id="stats-open-btn">📊 STATS</button>
+        </div>
+        <div class="home-btn-row">
+          <button class="home-btn small" id="achievements-open-btn">🎖 MEDALS</button>
+          <button class="home-btn small" id="settings-open-btn">⚙ SETTINGS</button>
+        </div>
+      </div>
     </div>
     <div id="road-preview"></div>
   </div>
@@ -64,9 +81,9 @@
   <div id="screen-pause" class="screen">
     <div class="screen-inner">
       <div class="overlay-title">PAUSED</div>
-      <button class="big-btn" id="resume-btn">RESUME</button>
-      <button class="small-btn" id="settings-pause-btn">⚙ SETTINGS</button>
-      <button class="small-btn" id="home-from-pause">HOME</button>
+      <button class="home-btn primary" id="resume-btn">▶ RESUME</button>
+      <button class="home-btn secondary" id="settings-pause-btn">⚙ SETTINGS</button>
+      <button class="home-btn ghost" id="home-from-pause">⌂ HOME</button>
     </div>
   </div>
 
@@ -78,88 +95,76 @@
         <div class="go-stat"><span class="lbl">SCORE</span><span id="go-score">0</span></div>
         <div class="go-stat"><span class="lbl">BEST</span><span id="go-best">0</span></div>
         <div class="go-stat"><span class="lbl">LEVEL</span><span id="go-level">1</span></div>
+        <div class="go-stat"><span class="lbl">DISTANCE</span><span id="go-distance">0 m</span></div>
       </div>
       <div id="new-best-badge" hidden>🏆 NEW BEST!</div>
       <div id="go-daily-badge" hidden></div>
       <div id="lb-entry-wrap">
         <input id="lb-name-input" type="text" maxlength="16" placeholder="Your name…" autocomplete="off" spellcheck="false">
-        <button class="big-btn" id="lb-submit-btn">SUBMIT SCORE</button>
+        <button class="home-btn primary" id="lb-submit-btn">SUBMIT SCORE</button>
         <div id="lb-submit-status"></div>
       </div>
-      <button class="big-btn" id="retry-btn">RETRY</button>
-      <button class="small-btn" id="home-from-go">HOME</button>
+      <button class="home-btn primary" id="retry-btn">↺ RETRY</button>
+      <button class="home-btn ghost" id="home-from-go">⌂ HOME</button>
     </div>
   </div>
 
   <!-- LEADERBOARD SCREEN -->
   <div id="screen-leaderboard" class="screen">
     <div class="screen-inner lb-screen-inner">
-      <div class="lb-header-row">
-        <div class="overlay-title lb-title">🏆 TOP DRIVERS</div>
-      </div>
+      <div class="overlay-title lb-title">🏆 TOP DRIVERS</div>
       <div id="lb-list-wrap">
         <div id="lb-list"><div class="lb-loading"><span class="lb-spinner"></span>Loading…</div></div>
       </div>
-      <button class="big-btn" id="lb-close-btn">CLOSE</button>
+      <button class="home-btn ghost" id="lb-close-btn">✕ CLOSE</button>
     </div>
   </div>
 
   <!-- STATS SCREEN -->
   <div id="screen-stats" class="screen">
     <div class="screen-inner stats-screen-inner">
-      <div class="overlay-title" style="font-size:24px;letter-spacing:3px;">📊 MY STATS</div>
+      <div class="overlay-title screen-title">📊 MY STATS</div>
       <div id="stats-body"></div>
-      <button class="big-btn" id="stats-close-btn">CLOSE</button>
+      <button class="home-btn ghost" id="stats-close-btn">✕ CLOSE</button>
     </div>
   </div>
 
   <!-- ACHIEVEMENTS SCREEN -->
   <div id="screen-achievements" class="screen">
     <div class="screen-inner ach-screen-inner">
-      <div class="overlay-title" style="font-size:24px;letter-spacing:3px;">🎖 ACHIEVEMENTS</div>
+      <div class="overlay-title screen-title">🎖 MEDALS</div>
       <div id="achievements-list-wrap">
         <div id="achievements-list"></div>
       </div>
-      <button class="big-btn" id="achievements-close-btn">CLOSE</button>
+      <button class="home-btn ghost" id="achievements-close-btn">✕ CLOSE</button>
     </div>
   </div>
 
   <!-- SETTINGS SCREEN -->
   <div id="screen-settings" class="screen">
     <div class="screen-inner settings-panel">
-      <div class="overlay-title" style="font-size:24px;letter-spacing:3px;">SETTINGS</div>
-      <div class="setting-row">
-        <span class="setting-label">🔊 Sound</span>
-        <button class="toggle-btn" id="set-sound">ON</button>
-      </div>
-      <div class="setting-row">
-        <span class="setting-label">📳 Vibration</span>
-        <button class="toggle-btn" id="set-vibrate">ON</button>
-      </div>
-      <div class="setting-row">
-        <span class="setting-label">🌀 Gyroscope</span>
-        <button class="toggle-btn" id="set-gyro">OFF</button>
-      </div>
-      <div class="setting-row">
-        <span class="setting-label">👆 Swipe Steer</span>
-        <button class="toggle-btn" id="set-swipe">ON</button>
-      </div>
-      <div class="setting-row">
-        <span class="setting-label">⚡ Boost Button</span>
-        <button class="toggle-btn" id="set-boost">ON</button>
-      </div>
+      <div class="overlay-title screen-title">SETTINGS</div>
+      <div class="setting-row"><span class="setting-label">🔊 Sound</span><button class="toggle-btn" id="set-sound">ON</button></div>
+      <div class="setting-row"><span class="setting-label">📳 Vibration</span><button class="toggle-btn" id="set-vibrate">ON</button></div>
+      <div class="setting-row"><span class="setting-label">🌀 Gyroscope</span><button class="toggle-btn" id="set-gyro">OFF</button></div>
+      <div class="setting-row"><span class="setting-label">👆 Swipe Steer</span><button class="toggle-btn" id="set-swipe">ON</button></div>
+      <div class="setting-row"><span class="setting-label">⚡ Boost Button</span><button class="toggle-btn" id="set-boost">ON</button></div>
       <div class="setting-row">
         <span class="setting-label">🎮 Sensitivity</span>
-        <div class="slider-wrap">
-          <input type="range" id="set-sensitivity" min="1" max="10" value="5">
-          <span id="sens-val">5</span>
-        </div>
+        <div class="slider-wrap"><input type="range" id="set-sensitivity" min="1" max="10" value="5"><span id="sens-val">5</span></div>
       </div>
-      <div class="setting-row">
-        <span class="setting-label">🌙 Night Mode</span>
-        <button class="toggle-btn" id="set-night">OFF</button>
-      </div>
-      <button class="big-btn" id="settings-close-btn" style="margin-top:8px;">DONE</button>
+      <div class="setting-row"><span class="setting-label">🌙 Night Mode</span><button class="toggle-btn" id="set-night">OFF</button></div>
+      <button class="home-btn primary" id="settings-close-btn" style="margin-top:6px;">✓ DONE</button>
+    </div>
+  </div>
+
+  <!-- DAILY COMPLETE OVERLAY (shown in-game when goal reached) -->
+  <div id="daily-complete-overlay" hidden>
+    <div id="daily-complete-inner">
+      <div id="daily-complete-title">DAILY COMPLETE!</div>
+      <div id="daily-complete-goal"></div>
+      <div id="daily-complete-score"></div>
+      <div id="daily-complete-countdown"></div>
     </div>
   </div>
 
