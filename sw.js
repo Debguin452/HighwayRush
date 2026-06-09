@@ -1,40 +1,39 @@
-const CACHE = 'hr-v4';
-const FILES = [
-  '.', './index.html', './style.css', './script.js', './manifest.json',
-  './images/car.png', './images/road.png',
-  './images/traffic.png', './images/traffic2.png',
-  './images/traffic3.png', './images/traffic4.png',
-  './sounds/crash.mp3', './sounds/drive.mp3'
-];
+const CACHE = 'hr-v5';
 
-self.addEventListener('install', e => {
-  e.waitUntil(
-    caches.open(CACHE)
-      .then(c => c.addAll(FILES))
-      .then(() => self.skipWaiting())
-  );
-});
+self.addEventListener('install', () => self.skipWaiting());
 
-self.addEventListener('activate', e => {
-  e.waitUntil(
+self.addEventListener('activate', event => {
+  event.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(keys => Promise.all(keys.map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
 
-self.addEventListener('fetch', e => {
-  const url = new URL(e.request.url);
-  if (url.hostname === 'storegit.pages.dev') {
-    e.respondWith(
-      fetch(e.request).catch(() => new Response('{"error":"offline"}', {
-        status: 503, headers: {'Content-Type': 'application/json'}
-      }))
-    );
+self.addEventListener('fetch', event => {
+  const req = event.request;
+  const url = new URL(req.url);
+  if (
+    url.pathname.endsWith('.html') ||
+    url.pathname.endsWith('.js') ||
+    url.pathname.endsWith('.css') ||
+    url.pathname === '/'
+  ) {
+    event.respondWith(fetch(req));
     return;
   }
-  e.respondWith(
-    caches.match(e.request).then(r => r || fetch(e.request).then(res => {
+  event.respondWith(
+    caches.match(req).then(cached => {
+      if (cached) return cached;
+
+      return fetch(req).then(res => {
+        const copy = res.clone();
+        caches.open(CACHE).then(cache => cache.put(req, copy));
+        return res;
+      });
+    })
+  );
+});    caches.match(e.request).then(r => r || fetch(e.request).then(res => {
       if (res && res.status === 200 && res.type === 'basic'){
         const clone = res.clone();
         caches.open(CACHE).then(c => c.put(e.request, clone));
