@@ -82,8 +82,8 @@ let distancePx = 0;
 let hornActive = false, hornTimer = 0;
 
 /* ══ BOOST COOLDOWN ══════════════════════════════════════ */
-const BOOST_DURATION = 11000;
-const BOOST_COOLDOWN = 14000;
+const BOOST_DURATION = 5000;
+const BOOST_COOLDOWN = 15000;
 let boostCooldown = 0;
 
 /* ══ ROAD PERKS ══════════════════════════════════════════ */
@@ -95,7 +95,7 @@ const PERK_DEFS = {
 let roadPerks = [];
 let activePerk = null;
 let perkSpawnTimer = 0;
-const PERK_SPAWN_INTERVAL = 2800; // frames between perk spawns (~47s at 60fps)
+const PERK_SPAWN_INTERVAL = 600; // frames between perk spawns (~47s at 60fps)
 
 /* ══ STREAK / COMBO ══════════════════════════════════════ */
 // Multiplier kicks in at 2nd near-miss (streak=2 → ×2, streak=4 → ×3, streak=7 → ×4, streak=10 → ×5)
