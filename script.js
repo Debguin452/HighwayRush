@@ -169,20 +169,20 @@ let _wasDaily = false;
 
 // 14 rotating goal types — selected by date seed (same for all players on same day)
 const DAILY_GOAL_DEFS = [
-  { type:'score',    label:'Score',       unit:'pts',    value:40  },
+  { type:'score',    label:'Score',       unit:'pts',    value:120  },
   { type:'nearmiss', label:'Near-misses', unit:'misses', value:8   },
-  { type:'distance', label:'Distance',    unit:'m',      value:300 },
-  { type:'level',    label:'Reach level', unit:'',       value:5   },
-  { type:'score',    label:'Score',       unit:'pts',    value:60  },
+  { type:'distance', label:'Distance',    unit:'m',      value:3500 },
+  { type:'level',    label:'Reach level', unit:'',       value:7   },
+  { type:'score',    label:'Score',       unit:'pts',    value:150  },
   { type:'nearmiss', label:'Near-misses', unit:'misses', value:12  },
-  { type:'distance', label:'Distance',    unit:'m',      value:500 },
-  { type:'score',    label:'Score',       unit:'pts',    value:80  },
+  { type:'distance', label:'Distance',    unit:'m',      value:2500 },
+  { type:'score',    label:'Score',       unit:'pts',    value:180  },
   { type:'nearmiss', label:'Near-misses', unit:'misses', value:15  },
-  { type:'level',    label:'Reach level', unit:'',       value:6   },
-  { type:'distance', label:'Distance',    unit:'m',      value:700 },
-  { type:'score',    label:'Score',       unit:'pts',    value:100 },
-  { type:'nearmiss', label:'Near-misses', unit:'misses', value:10  },
-  { type:'distance', label:'Distance',    unit:'m',      value:400 },
+  { type:'level',    label:'Reach level', unit:'',       value:8   },
+  { type:'distance', label:'Distance',    unit:'m',      value:2700 },
+  { type:'score',    label:'Score',       unit:'pts',    value:200 },
+  { type:'nearmiss', label:'Near-misses', unit:'misses', value:20  },
+  { type:'distance', label:'Distance',    unit:'m',      value:1400 },
 ];
 function getDailyGoal(seed){
   // Use seed-derived index so every player gets the same goal today
