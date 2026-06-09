@@ -30,7 +30,7 @@ const LB_IP_KEY = 'hr_lb_ip';
 const MAX_LB_ENTRIES = 100;
 
 /* ══ SETTINGS ════════════════════════════════════════════ */
-const DEFAULTS = { soundOn:true, vibrateOn:true, gyroOn:false, swipeOn:true, boostOn:true, sensitivity:5, nightMode:false };
+const DEFAULTS = { soundOn:true, vibrateOn:true, gyroOn:false, tapSteerOn:true, boostOn:true, sensitivity:5, nightMode:false };
 let S = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('hr_settings')||'{}'));
 function saveSett(){ localStorage.setItem('hr_settings', JSON.stringify(S)); }
 
@@ -82,8 +82,8 @@ let distancePx = 0;
 let hornActive = false, hornTimer = 0;
 
 /* ══ BOOST COOLDOWN ══════════════════════════════════════ */
-const BOOST_DURATION = 3500;
-const BOOST_COOLDOWN = 8000;
+const BOOST_DURATION = 11000;
+const BOOST_COOLDOWN = 14000;
 let boostCooldown = 0;
 
 /* ══ ROAD PERKS ══════════════════════════════════════════ */
@@ -95,7 +95,7 @@ const PERK_DEFS = {
 let roadPerks = [];
 let activePerk = null;
 let perkSpawnTimer = 0;
-const PERK_SPAWN_INTERVAL = 1100;
+const PERK_SPAWN_INTERVAL = 2800; // frames between perk spawns (~47s at 60fps)
 
 /* ══ STREAK / COMBO ══════════════════════════════════════ */
 // Multiplier kicks in at 2nd near-miss (streak=2 → ×2, streak=4 → ×3, streak=7 → ×4, streak=10 → ×5)
@@ -114,25 +114,34 @@ const ACHIEVEMENT_KEY = 'hr_achievements';
 let achievements = {};
 try { achievements = JSON.parse(localStorage.getItem(ACHIEVEMENT_KEY)||'{}'); } catch {}
 function saveAchievements(){ localStorage.setItem(ACHIEVEMENT_KEY, JSON.stringify(achievements)); }
-let _gameMisses = 0, _hornThisGame = false;
+let _gameMisses = 0, _hornThisGame = false, _boostUsedThisGame = false;
 
 const ACHIEVEMENT_DEFS = [
-  { id:'first_blood',  label:'🩸', name:'First Blood',    desc:'Survive your first game',              check:()=>stats.games>=1 },
-  { id:'speeder',      label:'⚡', name:'Speeder',         desc:'Reach level 5',                        check:()=>level>=5 },
-  { id:'zen',          label:'🧘', name:'Zen Driver',      desc:'Finish a game without using horn',     check:()=>!_hornThisGame&&score>=10 },
-  { id:'ghost',        label:'👻', name:'Ghost',           desc:'10 near-misses in one game',           check:()=>_gameMisses>=10 },
-  { id:'combo_master', label:'🔥', name:'Combo Master',    desc:'Hit a ×4 streak multiplier',           check:()=>streak>=7 },
-  { id:'century',      label:'💯', name:'Century',         desc:'Score 100 in one game',                check:()=>score>=100 },
-  { id:'survivor',     label:'🛡️', name:'Survivor',        desc:'Play 10 games',                        check:()=>stats.games>=10 },
-  { id:'veteran',      label:'🎖️', name:'Veteran',         desc:'Play 50 games',                        check:()=>stats.games>=50 },
-  { id:'road_warrior', label:'🏎️', name:'Road Warrior',    desc:'Travel 10 km total',                   check:()=>stats.distance>=10000 },
-  { id:'marathon',     label:'🏃', name:'Marathon',        desc:'Travel 42 km total',                   check:()=>stats.distance>=42000 },
-  { id:'level10',      label:'🚀', name:'Top Gear',        desc:'Reach level 10',                       check:()=>level>=10 },
-  { id:'daredevil',    label:'😤', name:'Daredevil',       desc:'50 near-misses in one game',           check:()=>_gameMisses>=50 },
-  { id:'unstoppable',  label:'💥', name:'Unstoppable',     desc:'Hit ×5 streak multiplier',             check:()=>streak>=10 },
-  { id:'high_roller',  label:'🌟', name:'High Roller',     desc:'Score 500 in one game',                check:()=>score>=500 },
-  { id:'daily_done',   label:'📅', name:'Daily Driver',    desc:'Complete a daily challenge',           check:()=>dailyState.done },
-  { id:'committed',    label:'🗓️', name:'Committed',       desc:'Complete 7 daily challenges',          check:()=>(stats.dailyCount||0)>=7 },
+  // ── EASY ─────────────────────────────────────────────
+  { id:'first_blood',  tier:'easy',       name:'First Drive',    desc:'Complete your first game',               check:()=>stats.games>=1 },
+  { id:'speeder',      tier:'easy',       name:'Speeder',        desc:'Reach level 5',                          check:()=>level>=5 },
+  { id:'century',      tier:'easy',       name:'Century',        desc:'Score 100 in one game',                  check:()=>score>=100 },
+  { id:'survivor',     tier:'easy',       name:'Survivor',       desc:'Play 10 games',                          check:()=>stats.games>=10 },
+  { id:'daily_done',   tier:'easy',       name:'Daily Driver',   desc:'Complete a daily challenge',             check:()=>dailyState.done },
+  // ── MEDIUM ───────────────────────────────────────────
+  { id:'ghost',        tier:'medium',     name:'Ghost',          desc:'Get 10 near-misses in one game',         check:()=>_gameMisses>=10 },
+  { id:'zen',          tier:'medium',     name:'Zen Driver',     desc:'Finish a game without using horn',       check:()=>!_hornThisGame&&score>=10 },
+  { id:'combo_master', tier:'medium',     name:'Combo Master',   desc:'Hit a x4 streak multiplier',            check:()=>streak>=7 },
+  { id:'veteran',      tier:'medium',     name:'Veteran',        desc:'Play 50 games',                         check:()=>stats.games>=50 },
+  { id:'road_warrior', tier:'medium',     name:'Road Warrior',   desc:'Travel 10 km total',                    check:()=>stats.distance>=10000 },
+  { id:'level10',      tier:'medium',     name:'Top Gear',       desc:'Reach level 10',                        check:()=>level>=10 },
+  { id:'committed',    tier:'medium',     name:'Committed',      desc:'Complete 7 daily challenges',           check:()=>(stats.dailyCount||0)>=7 },
+  // ── HARD ─────────────────────────────────────────────
+  { id:'high_roller',  tier:'hard',       name:'High Roller',    desc:'Score 500 in one game',                 check:()=>score>=500 },
+  { id:'daredevil',    tier:'hard',       name:'Daredevil',      desc:'Get 50 near-misses in one game',        check:()=>_gameMisses>=50 },
+  { id:'marathon',     tier:'hard',       name:'Marathon',       desc:'Travel 42 km total',                    check:()=>stats.distance>=42000 },
+  { id:'unstoppable',  tier:'hard',       name:'Unstoppable',    desc:'Hit x5 streak multiplier',              check:()=>streak>=10 },
+  { id:'no_boost_100', tier:'hard',       name:'Purist',         desc:'Score 100 without using boost',         check:()=>score>=100&&!_boostUsedThisGame },
+  // ── IMPOSSIBLE ───────────────────────────────────────
+  { id:'score1000',    tier:'impossible', name:'Legend',         desc:'Score 1000 in one game',                check:()=>score>=1000 },
+  { id:'miss100',      tier:'impossible', name:'Phantom',        desc:'Get 100 near-misses in one game',       check:()=>_gameMisses>=100 },
+  { id:'century_club', tier:'impossible', name:'Century Club',   desc:'Play 100 games',                        check:()=>stats.games>=100 },
+  { id:'trans_highway',tier:'impossible', name:'Trans-Highway',  desc:'Travel 200 km total',                   check:()=>stats.distance>=200000 },
 ];
 
 /* ══ DAILY CHALLENGE ═════════════════════════════════════ */
@@ -156,23 +165,33 @@ function makePRNG(seed){
 let dailyMode = false, dailyRng = null;
 let dailyGoalType = 'score', dailyGoalValue = 50;
 let dailyProgress = 0, dailyComplete = false;
+let _wasDaily = false;
 
-// Rotating daily goal types based on day-of-week
+// 14 rotating goal types — selected by date seed (same for all players on same day)
 const DAILY_GOAL_DEFS = [
-  { type:'score',    label:'Score',          unit:'pts',    value:50  },
-  { type:'nearmiss', label:'Near-misses',    unit:'misses', value:15  },
-  { type:'distance', label:'Distance',       unit:'m',      value:500 },
-  { type:'level',    label:'Reach level',    unit:'',       value:6   },
-  { type:'score',    label:'Score',          unit:'pts',    value:80  },
-  { type:'nearmiss', label:'Near-misses',    unit:'misses', value:25  },
-  { type:'score',    label:'Score',          unit:'pts',    value:120 },
+  { type:'score',    label:'Score',       unit:'pts',    value:40  },
+  { type:'nearmiss', label:'Near-misses', unit:'misses', value:8   },
+  { type:'distance', label:'Distance',    unit:'m',      value:300 },
+  { type:'level',    label:'Reach level', unit:'',       value:5   },
+  { type:'score',    label:'Score',       unit:'pts',    value:60  },
+  { type:'nearmiss', label:'Near-misses', unit:'misses', value:12  },
+  { type:'distance', label:'Distance',    unit:'m',      value:500 },
+  { type:'score',    label:'Score',       unit:'pts',    value:80  },
+  { type:'nearmiss', label:'Near-misses', unit:'misses', value:15  },
+  { type:'level',    label:'Reach level', unit:'',       value:6   },
+  { type:'distance', label:'Distance',    unit:'m',      value:700 },
+  { type:'score',    label:'Score',       unit:'pts',    value:100 },
+  { type:'nearmiss', label:'Near-misses', unit:'misses', value:10  },
+  { type:'distance', label:'Distance',    unit:'m',      value:400 },
 ];
 function getDailyGoal(seed){
-  const dow = new Date().getDay(); // 0=Sun…6=Sat
-  const def = DAILY_GOAL_DEFS[dow % DAILY_GOAL_DEFS.length];
-  // Slightly vary value based on seed
-  const variation = Math.round((makePRNG(seed)() - 0.5) * def.value * 0.2);
-  return { ...def, value: def.value + variation };
+  // Use seed-derived index so every player gets the same goal today
+  const rng = makePRNG(seed);
+  const idx = Math.floor(rng() * DAILY_GOAL_DEFS.length);
+  const def = DAILY_GOAL_DEFS[idx];
+  // ±10% variation still seeded, same for everyone
+  const variation = Math.round((rng() - 0.5) * def.value * 0.10);
+  return { ...def, value: Math.max(1, def.value + variation) };
 }
 
 bestEl.textContent = best;
@@ -185,8 +204,8 @@ const MAX_TILT = 0.28, TILT_SPEED = 0.22, TILT_RETURN = 0.12;
 /* ══ SPEEDOMETER ═════════════════════════════════════════ */
 let speedoNeedle = 0;
 function drawSpeedometer(speedKmh){
-  const target = Math.min(speedKmh, 200);
-  speedoNeedle += (target - speedoNeedle) * 0.12;
+  const target = Math.min(speedKmh, 220);
+  speedoNeedle += (target - speedoNeedle) * 0.08;
   const W = speedoCanvas.width, H = speedoCanvas.height;
   const cx = W/2, cy = H/2+2, R = W/2-3;
   speedoCtx.clearRect(0,0,W,H);
@@ -194,7 +213,7 @@ function drawSpeedometer(speedKmh){
   const totalAng = endAng - startAng;
   speedoCtx.beginPath(); speedoCtx.arc(cx,cy,R,startAng,endAng);
   speedoCtx.lineWidth=3; speedoCtx.strokeStyle='rgba(255,255,255,0.07)'; speedoCtx.stroke();
-  const fraction = Math.min(speedoNeedle/200,1);
+  const fraction = Math.min(speedoNeedle/220,1);
   const color = fraction<0.55?'#39ff8a':fraction<0.78?'#ff8c00':'#ff3c3c';
   speedoCtx.beginPath(); speedoCtx.arc(cx,cy,R,startAng,startAng+totalAng*fraction);
   speedoCtx.lineWidth=3; speedoCtx.strokeStyle=color; speedoCtx.stroke();
@@ -214,7 +233,7 @@ function drawSpeedometer(speedKmh){
   speedoCtx.fillStyle='#fff'; speedoCtx.fill();
   speedoCtx.font="bold 8px 'Orbitron',monospace";
   speedoCtx.fillStyle=color; speedoCtx.textAlign='center';
-  speedoCtx.fillText(Math.round(speedoNeedle),cx,cy+13); speedoCtx.textAlign='left';
+  speedoCtx.fillText(Math.round(speedoNeedle)+'',cx,cy+13); speedoCtx.textAlign='left';
 }
 
 /* ══ SCREEN MANAGEMENT ═══════════════════════════════════ */
@@ -237,12 +256,12 @@ function setHudVisible(v){
 /* ══ SETTINGS UI ═════════════════════════════════════════ */
 function applySettingsUI(){
   const map = {
-    'set-sound':   [S.soundOn,   v=>{ S.soundOn=v;   if(!v) stopEngine(); else if(STATE==='playing') startEngine(); }],
-    'set-vibrate': [S.vibrateOn, v=>{ S.vibrateOn=v; }],
-    'set-gyro':    [S.gyroOn,    v=>{ S.gyroOn=v;    gyroHint.hidden=!v; if(v) requestGyroPermission(); }],
-    'set-swipe':   [S.swipeOn,   v=>{ S.swipeOn=v;   }],
-    'set-boost':   [S.boostOn,   v=>{ S.boostOn=v;   $('btn-boost').style.display=v?'':'none'; }],
-    'set-night':   [S.nightMode, v=>{ S.nightMode=v; document.body.classList.toggle('night-mode',v); }],
+    'set-sound':    [S.soundOn,    v=>{ S.soundOn=v;    if(!v) stopEngine(); else if(STATE==='playing') startEngine(); }],
+    'set-vibrate':  [S.vibrateOn,  v=>{ S.vibrateOn=v; }],
+    'set-gyro':     [S.gyroOn,     v=>{ S.gyroOn=v;    gyroHint.hidden=!v; if(v) requestGyroPermission(); }],
+    'set-tapsteer': [S.tapSteerOn, v=>{ S.tapSteerOn=v; }],
+    'set-boost':    [S.boostOn,    v=>{ S.boostOn=v;   $('btn-boost').style.display=v?'':'none'; }],
+    'set-night':    [S.nightMode,  v=>{ S.nightMode=v; document.body.classList.toggle('night-mode',v); }],
   };
   for (const [id,[val]] of Object.entries(map)){
     const btn=$(id); if(!btn) continue;
@@ -250,7 +269,7 @@ function applySettingsUI(){
     btn.className='toggle-btn '+(val?'on':'off');
     btn.onclick=()=>{
       const next=!map[id][0]; map[id][0]=next;
-      const sKey={sound:'soundOn',vibrate:'vibrateOn',gyro:'gyroOn',swipe:'swipeOn',boost:'boostOn',night:'nightMode'}[id.replace('set-','')];
+      const sKey={sound:'soundOn',vibrate:'vibrateOn',gyro:'gyroOn',tapsteer:'tapSteerOn',boost:'boostOn',night:'nightMode'}[id.replace('set-','')];
       if(sKey) S[sKey]=next;
       map[id][1](next); saveSett(); applySettingsUI();
     };
@@ -408,9 +427,10 @@ function startGame(){
   hornActive=false; hornTimer=0; distancePx=0;
   roadPerks=[]; activePerk=null; perkSpawnTimer=0;
   boostCooldown=0; updateBoostArc(1);
-  streak=0; streakTimer=0; _gameMisses=0; _hornThisGame=false;
+  streak=0; streakTimer=0; _gameMisses=0; _hornThisGame=false; _boostUsedThisGame=false;
   dailyComplete=false; dailyProgress=0;
-  speedoNeedle=60;
+  _wasDaily=dailyMode;
+  speedoNeedle=0;
   scoreEl.textContent='0'; levelEl.textContent='1';
   updateStreakHUD(); updateDistHUD(0);
   if(dailyMode){
@@ -635,15 +655,15 @@ function checkAchievements(){
     if(achievements[def.id]) return;
     if(!def.check()) return;
     achievements[def.id]=true; saveAchievements();
-    flashAchievementToast(def.label+' '+def.name);
+    flashAchievementToast(def.name);
     renderAchievementsTab();
   });
 }
-function flashAchievementToast(label){
+function flashAchievementToast(name){
   const el=$('achievement-toast'); if(!el) return;
-  el.textContent=label+'  UNLOCKED';
+  el.textContent='MEDAL UNLOCKED  '+name;
   el.hidden=false; el.classList.add('show');
-  setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>{ el.hidden=true; },350); },2400);
+  setTimeout(()=>{ el.classList.remove('show'); setTimeout(()=>{ el.hidden=true; },350); },2600);
 }
 function renderAchievementsTab(){
   const el=$('achievements-list'); if(!el) return;
@@ -700,23 +720,22 @@ function checkDailyGoal(){
 }
 
 function triggerDailyComplete(){
-  // Save best
   const seed=getTodaySeed();
   const prev=(dailyState.seed===seed)?dailyState.score:0;
-  if(score>prev){
-    dailyState={seed,done:true,score};
-    localStorage.setItem(DAILY_KEY,JSON.stringify(dailyState));
-  } else if(!dailyState.done||dailyState.seed!==seed){
-    dailyState={seed,done:true,score:prev};
-    localStorage.setItem(DAILY_KEY,JSON.stringify(dailyState));
+  const newScore=Math.max(score,prev);
+  dailyState={seed,done:true,score:newScore};
+  localStorage.setItem(DAILY_KEY,JSON.stringify(dailyState));
+  // Only count if not already completed today
+  const alreadyCounted=(dailyState.seed===seed&&(stats._dailySeedCounted===seed));
+  if(!alreadyCounted){
+    stats.dailyCount=(stats.dailyCount||0)+1;
+    stats._dailySeedCounted=seed;
+    saveStats();
   }
-  stats.dailyCount=(stats.dailyCount||0)+1; saveStats();
   checkAchievements();
 
-  // Show overlay with 5-second countdown
   const overlay=$('daily-complete-overlay'); if(!overlay) return;
-  const goal=getDailyGoal(getTodaySeed());
-  $('daily-complete-title').textContent='DAILY COMPLETE!';
+  const goal=getDailyGoal(seed);
   $('daily-complete-goal').textContent=goal.label+': '+dailyGoalValue+(goal.unit?' '+goal.unit:'');
   $('daily-complete-score').textContent='Score: '+score;
   overlay.hidden=false;
@@ -729,7 +748,6 @@ function triggerDailyComplete(){
       clearInterval(tick);
       overlay.hidden=true;
       dailyMode=false;
-      // Game continues in normal mode — player keeps playing
     } else {
       $('daily-complete-countdown').textContent='Continuing in '+secs+'s…';
     }
@@ -737,23 +755,24 @@ function triggerDailyComplete(){
 }
 
 function finishDailyChallenge(){
-  if(!dailyMode) return;
+  if(!_wasDaily) return;
   const seed=getTodaySeed();
+  const reached=dailyProgress>=dailyGoalValue;
   const prev=(dailyState.seed===seed)?dailyState.score:0;
-  if(score>prev){
-    dailyState={seed,done:true,score};
-    localStorage.setItem(DAILY_KEY,JSON.stringify(dailyState));
-  } else if(!dailyState.done||dailyState.seed!==seed){
-    dailyState={seed,done:true,score:Math.max(score,prev)};
+  if(reached){
+    const newScore=Math.max(score,prev);
+    dailyState={seed,done:true,score:newScore};
     localStorage.setItem(DAILY_KEY,JSON.stringify(dailyState));
   }
-  dailyMode=false;
+  _wasDaily=false;
   const badge=$('go-daily-badge');
   if(badge){
     badge.hidden=false;
     const goal=getDailyGoal(seed);
-    const reached=dailyProgress>=dailyGoalValue;
-    badge.textContent=(reached?'✓ ':'')+'Daily '+goal.label+': '+dailyProgress+'/'+dailyGoalValue+(goal.unit?' '+goal.unit:'')+(dailyState.score>0?' · Best: '+dailyState.score:'');
+    badge.textContent=(reached?'✓ DAILY COMPLETE  ':'')
+      +'Goal: '+goal.label+' '+dailyGoalValue+(goal.unit?' '+goal.unit:'')
+      +'  Progress: '+dailyProgress
+      +(dailyState.done&&dailyState.seed===seed?' · Best: '+dailyState.score:'');
   }
 }
 
@@ -783,7 +802,36 @@ function drawDailyHUD(){
   ctx.textAlign='left'; ctx.restore();
 }
 
-/* ══ SPEED LINES ═════════════════════════════════════════ */
+function drawFinishLine(){
+  const goalMetres=dailyGoalValue;
+  const currentMetres=Math.round((distancePx/GH_BASE)*60);
+  const remaining=goalMetres-currentMetres;
+  if(remaining<=0||remaining>120) return; // only show when <120m away
+  // finishY: how many road pixels until finish
+  const pixelsPerMetre=GH_BASE/60;
+  const finishY=GH_BASE - remaining*pixelsPerMetre;
+  if(finishY<0||finishY>GH_BASE) return;
+  ctx.save();
+  // Checkered pattern
+  const sq=14, cols=Math.ceil(GW/sq);
+  for(let c=0;c<cols;c++){
+    const x=c*sq;
+    const isWhite=(c%2===0);
+    ctx.fillStyle=isWhite?'rgba(255,255,255,0.92)':'rgba(0,0,0,0.85)';
+    ctx.fillRect(x,finishY,sq,sq/2);
+  }
+  // Glow line
+  ctx.shadowColor='#39ff8a'; ctx.shadowBlur=18;
+  ctx.strokeStyle='#39ff8a'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,finishY); ctx.lineTo(GW,finishY); ctx.stroke();
+  // Label
+  ctx.shadowBlur=0;
+  ctx.font="bold 11px 'Orbitron',monospace";
+  ctx.fillStyle='#39ff8a'; ctx.textAlign='center';
+  ctx.fillText('FINISH  '+remaining+'m', GW/2, finishY-6);
+  ctx.restore();
+  ctx.textAlign='left';
+}
 function spawnSpeedLines(){
   if(speedLines.length>22) return;
   for(let i=0;i<3;i++) speedLines.push({x:Math.random()*GW,y:Math.random()*GH_BASE*0.6,len:18+Math.random()*55,alpha:0.55+Math.random()*0.4,speed:14+Math.random()*18});
@@ -910,29 +958,18 @@ function draw(){
     ctx.globalAlpha=1; ctx.textAlign='left';
   }
 
-  // Floating combo above car
-  const mult=getStreakMult();
-  if(streak>=2&&mult>1){
-    const pulse=0.85+0.15*Math.sin(Date.now()/120);
-    ctx.save();
-    ctx.globalAlpha=Math.min(1,streakTimer/40)*pulse;
-    ctx.font=`bold ${12+mult*2}px 'Orbitron',monospace`;
-    ctx.textAlign='center';
-    ctx.fillStyle=mult>=5?'#ff3c3c':mult>=4?'#ff8c00':mult>=3?'#ffcc00':'#39ff8a';
-    ctx.shadowColor=ctx.fillStyle; ctx.shadowBlur=10;
-    ctx.fillText('\u00d7'+mult,carX+CAR_W/2,carDrawY-10);
-    ctx.restore();
-  }
-
-  // Daily HUD bar (drawn on canvas, inside the game view)
+  // Daily HUD bar
   if(dailyMode) drawDailyHUD();
+  // Finish line for distance challenge
+  if(dailyMode && dailyGoalType==='distance' && !dailyComplete) drawFinishLine();
 }
 
 /* ══ HUD UPDATE ══════════════════════════════════════════ */
 function updateHUD(){
-  const pct=Math.min(100,(roadSpeed/(BASE_SPD*2.8))*100);
-  const kmh=Math.round(pct*1.8);
+  const maxSpd = BASE_SPD * 2.8;
+  const kmh = Math.round(Math.min(roadSpeed / maxSpd, 1) * 220);
   drawSpeedometer(kmh);
+  const pct = Math.min(100, (roadSpeed / (BASE_SPD * 2.8)) * 100);
   if(S.soundOn) updateEngineAudio(pct,boostActive,brakeActive);
   // Live distance in HUD
   const metres=Math.round((distancePx/GH_BASE)*60);
@@ -961,11 +998,26 @@ function loop(ts){
       updateBoostArc(1-boostCooldown/BOOST_COOLDOWN);
     }
 
-    // Speed
-    const cruiseSpeed=BASE_SPD+(level-1)*0.45;
-    const targetSpeed=boostActive?cruiseSpeed*2:brakeActive?cruiseSpeed*0.35:cruiseSpeed;
-    const speedLerp=boostActive?0.01*dt:brakeActive?0.08*dt:roadSpeed<BASE_SPD*0.5?0.1*dt:roadSpeed<BASE_SPD?0.008*dt:0.012*dt;
-    roadSpeed=lerp(roadSpeed,targetSpeed,speedLerp);
+    // Natural speed physics — boost ramps in over ~2s, brake drops fast
+    const cruiseSpeed = BASE_SPD + (level-1) * 0.45;
+    const boostTarget = cruiseSpeed * 2.1;
+    const brakeTarget = cruiseSpeed * 0.30;
+    let targetSpeed, accelT;
+    if(boostActive){
+      // Smooth boost ramp: ease-in over duration
+      const elapsed = BOOST_DURATION - boostTimer;
+      const t = Math.min(1, elapsed / 2200);  // 2.2s to full boost
+      const eased = t * t * (3 - 2 * t);     // smoothstep
+      targetSpeed = cruiseSpeed + (boostTarget - cruiseSpeed) * eased;
+      accelT = 0.035 * dt;
+    } else if(brakeActive){
+      targetSpeed = brakeTarget;
+      accelT = 0.14 * dt;
+    } else {
+      targetSpeed = cruiseSpeed;
+      accelT = roadSpeed > cruiseSpeed ? 0.035 * dt : 0.018 * dt;
+    }
+    roadSpeed = lerp(roadSpeed, targetSpeed, accelT);
 
     carYOffsetTarget=boostActive?CAR_BOOST_Y_LIFT:brakeActive?BRAKE_Y_LIFT:0;
     carYOffset=lerp(carYOffset,carYOffsetTarget,0.12*dt);
@@ -992,8 +1044,16 @@ function loop(ts){
     const carDrawY=GH_BASE-CAR_H-CAR_BASE_Y_OFFSET-carYOffset;
     const chb=hbox(carX,carDrawY,CAR_W,CAR_H);
 
-    // Perk expiry
-    if(activePerk&&Date.now()>=activePerk.expiresAt) clearPerk();
+    // Perk expiry + timer bar update
+    if(activePerk){
+      if(Date.now()>=activePerk.expiresAt){ clearPerk(); }
+      else {
+        const def=PERK_DEFS[activePerk.type];
+        const frac=Math.max(0,(activePerk.expiresAt-Date.now())/def.dur);
+        const bar=$('perk-timer-bar');
+        if(bar){ bar.style.width=(frac*100)+'%'; bar.style.background=def.color; }
+      }
+    }
 
     // Road perk movement + pickup
     for(let i=roadPerks.length-1;i>=0;i--){
@@ -1214,7 +1274,37 @@ function _playTurboHiss(){
 }
 function playWhoosh(){
   if(!S.soundOn) return;
-  try { const ac=getAudioCtx(); const now=ac.currentTime; const bufSize=ac.sampleRate*0.35; const buf=ac.createBuffer(1,bufSize,ac.sampleRate); const data=buf.getChannelData(0); for(let i=0;i<bufSize;i++) data[i]=Math.random()*2-1; const src=ac.createBufferSource(); src.buffer=buf; const bpf=ac.createBiquadFilter(); bpf.type='bandpass'; bpf.frequency.setValueAtTime(3500,now); bpf.frequency.linearRampToValueAtTime(600,now+0.3); bpf.Q.value=1.2; const g=ac.createGain(); g.gain.setValueAtTime(0.5,now); g.gain.exponentialRampToValueAtTime(0.001,now+0.32); src.connect(bpf); bpf.connect(g); g.connect(ac.destination); src.start(now); src.stop(now+0.35); } catch {}
+  try {
+    const ac=getAudioCtx(); const now=ac.currentTime;
+    const dur=0.55;
+    // Low-frequency wind body
+    const bufSize=Math.floor(ac.sampleRate*dur);
+    const buf=ac.createBuffer(2,bufSize,ac.sampleRate);
+    for(let ch=0;ch<2;ch++){
+      const d=buf.getChannelData(ch);
+      for(let i=0;i<bufSize;i++){
+        const t=i/ac.sampleRate;
+        // Pink-ish noise: mix of filtered random
+        d[i]=(Math.random()*2-1)*0.6 + Math.sin(t*380+Math.random())*0.15;
+      }
+    }
+    const src=ac.createBufferSource(); src.buffer=buf;
+    // Bandpass sweeping down — gives the "woosh" character
+    const bp=ac.createBiquadFilter(); bp.type='bandpass';
+    bp.frequency.setValueAtTime(2800,now);
+    bp.frequency.exponentialRampToValueAtTime(180,now+dur);
+    bp.Q.value=0.9;
+    // High-pass to remove rumble
+    const hp=ac.createBiquadFilter(); hp.type='highpass';
+    hp.frequency.setValueAtTime(120,now);
+    // Gain envelope: fast attack, long decay
+    const g=ac.createGain();
+    g.gain.setValueAtTime(0,now);
+    g.gain.linearRampToValueAtTime(0.55,now+0.025);
+    g.gain.exponentialRampToValueAtTime(0.001,now+dur);
+    src.connect(bp); bp.connect(hp); hp.connect(g); g.connect(ac.destination);
+    src.start(now); src.stop(now+dur);
+  } catch {}
 }
 const sndCrash=$('snd-crash');
 function playCrash(){
@@ -1231,7 +1321,11 @@ function playHorn(){
 $('play-btn').addEventListener('click', startGame);
 $('pause-btn').addEventListener('click', pauseGame);
 $('resume-btn').addEventListener('click', resumeGame);
-$('retry-btn').addEventListener('click', startGame);
+$('retry-btn').addEventListener('click', ()=>{
+  // If last game was daily, re-enter daily mode for retry
+  if (_wasDaily){ dailyMode=true; dailyRng=makePRNG(getTodaySeed()); }
+  startGame();
+});
 $('home-from-pause').addEventListener('click', goHome);
 $('home-from-go').addEventListener('click', goHome);
 $('lb-open-btn').addEventListener('click', openLeaderboard);
@@ -1286,6 +1380,7 @@ $('btn-boost').addEventListener('pointerdown', e=>{
   if(STATE!=='playing') return;
   if(boostCooldown>0) return;
   boostActive=true; boostTimer=BOOST_DURATION; boostCooldown=BOOST_COOLDOWN;
+  _boostUsedThisGame=true;
   updateBoostArc(0); playBoostSurge(); showToast(boostToast,300);
   if(S.vibrateOn&&navigator.vibrate) navigator.vibrate(60);
 });
@@ -1319,15 +1414,32 @@ document.addEventListener('keyup', e=>{
   if(e.key==='ArrowDown') brakeActive=false;
 });
 
-let swipeX=null, swipeStartX=null;
-gc.addEventListener('touchstart', e=>{ if(S.swipeOn){ swipeX=e.touches[0].clientX; swipeStartX=swipeX; } },{passive:true});
-gc.addEventListener('touchmove',  e=>{
-  if(!S.swipeOn||swipeX===null) return;
-  const dx=e.touches[0].clientX-swipeX;
-  if(Math.abs(e.touches[0].clientX-swipeStartX)>6){ steerInput=dx>0?1:-1; carVelX+=(dx>0?1:-1)*Math.min(Math.abs(dx)/18,1)*steerAccel()*0.6; }
-  swipeX=e.touches[0].clientX;
-},{passive:true});
-gc.addEventListener('touchend', ()=>{ steerInput=0; swipeX=null; carVelX*=0.75; },{passive:true});
+// Tap half-screen steering: left half = steer left, right half = steer right
+// Works on the canvas element only while playing
+let _tapSteerActive = false;
+gc.addEventListener('pointerdown', e => {
+  if (!S.tapSteerOn || STATE !== 'playing') return;
+  e.preventDefault();
+  _tapSteerActive = true;
+  const rect = gc.getBoundingClientRect();
+  const relX = e.clientX - rect.left;
+  steerInput = relX < rect.width / 2 ? -1 : 1;
+}, { passive: false });
+gc.addEventListener('pointermove', e => {
+  if (!_tapSteerActive || !S.tapSteerOn || STATE !== 'playing') return;
+  const rect = gc.getBoundingClientRect();
+  const relX = e.clientX - rect.left;
+  steerInput = relX < rect.width / 2 ? -1 : 1;
+}, { passive: true });
+gc.addEventListener('pointerup', e => {
+  _tapSteerActive = false;
+  steerInput = 0;
+  carVelX *= 0.75;
+}, { passive: true });
+gc.addEventListener('pointercancel', () => {
+  _tapSteerActive = false;
+  steerInput = 0;
+});
 
 function requestGyroPermission(){ if(typeof DeviceOrientationEvent!=='undefined'&&typeof DeviceOrientationEvent.requestPermission==='function') DeviceOrientationEvent.requestPermission().catch(()=>{}); }
 window.addEventListener('deviceorientation', e=>{
