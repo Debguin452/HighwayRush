@@ -1449,29 +1449,24 @@ lbFetch();
 
 if('serviceWorker' in navigator){
   window.addEventListener('load',()=>{
+    const hadController=!!navigator.serviceWorker.controller;
     navigator.serviceWorker.register('./sw.js').then(reg=>{
       reg.addEventListener('updatefound',()=>{
-        const newWorker=reg.installing;
-        newWorker.addEventListener('statechange',()=>{
-          if(newWorker.state==='installed'&&navigator.serviceWorker.controller){
-            const banner=document.createElement('div');
-            banner.id='update-banner';
-            banner.innerHTML='<span>New version available</span><button onclick="window.location.reload()">Update</button>';
-            document.body.appendChild(banner);
-          }
+        if(!hadController) return;
+        const w=reg.installing;
+        w.addEventListener('statechange',()=>{
+          if(w.state==='installed') showUpdateBanner();
         });
       });
     }).catch(()=>{});
-    if(navigator.serviceWorker.controller){
-      navigator.serviceWorker.controller.postMessage('CHECK_UPDATE');
-    }
-    navigator.serviceWorker.addEventListener('message',e=>{
-      if(e.data&&e.data.type==='UPDATE_AVAILABLE'){
-        const banner=document.createElement('div');
-        banner.id='update-banner';
-        banner.innerHTML='<span>New version available</span><button onclick="window.location.reload()">Update</button>';
-        if(!document.getElementById('update-banner'))document.body.appendChild(banner);
-      }
-    });
   });
+}
+function showUpdateBanner(){
+  if(document.getElementById('update-banner')) return;
+  const b=document.createElement('div');
+  b.id='update-banner';
+  b.innerHTML='<span>Update available</span><button id="update-btn">Reload</button>';
+  document.body.appendChild(b);
+  document.getElementById('update-btn').addEventListener('click',()=>window.location.reload());
+  setTimeout(()=>{ const el=document.getElementById('update-banner'); if(el) el.remove(); },8000);
 }
