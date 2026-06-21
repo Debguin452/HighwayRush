@@ -393,6 +393,13 @@ function startGame(){
   dailyComplete=false;dailyProgress=0;
   _wasDaily=dailyMode;
   speedoNeedle=0;
+  // Reset all game-over screen state so nothing bleeds between runs
+  newBestBadge.hidden=true;
+  const _gdb=$('go-daily-badge');if(_gdb){_gdb.hidden=true;_gdb.textContent='';}
+  const _lbew=$('lb-entry-wrap');if(_lbew)_lbew.style.display='';
+  const _lbs=$('lb-submit-status');if(_lbs)_lbs.textContent='';
+  const _lbn=$('lb-name-input');if(_lbn){_lbn.value='';_lbn.disabled=false;}
+  const _lbb=$('lb-submit-btn');if(_lbb)_lbb.disabled=false;
   scoreEl.textContent='0';levelEl.textContent='1';
   updateStreakHUD();updateDistHUD(0);updatePerkTimerBar();
   if(dailyMode){
@@ -442,11 +449,19 @@ async function doGameOver(){
   goBestEl.textContent=best;
   goLevelEl.textContent=level;
   newBestBadge.hidden=!isNew;
+  // Always explicitly reset the daily badge — never leave stale state
+  const gdb=$('go-daily-badge');
+  if(gdb){gdb.hidden=true;gdb.textContent='';}
   const goDistEl=$('go-distance');
   if(goDistEl)goDistEl.textContent=metresThisGame>=1000?(metresThisGame/1000).toFixed(2)+' km':metresThisGame+' m';
   setHudVisible(false);showScreen('gameover');
   if(S.vibrateOn&&navigator.vibrate)navigator.vibrate([80,40,80]);
   const entryWrap=$('lb-entry-wrap'),statusEl=$('lb-submit-status');
+  // Always reset entry wrap before deciding whether to show it
+  if(entryWrap)entryWrap.style.display='';
+  if(statusEl)statusEl.textContent='';
+  const lbn=$('lb-name-input');if(lbn){lbn.value='';lbn.disabled=false;}
+  const lbb=$('lb-submit-btn');if(lbb)lbb.disabled=false;
   const ipName=await getNameForIP();
   if(ipName&&!playerName){playerName=ipName;localStorage.setItem(LB_PLAYER_KEY,playerName);}
   if(playerName){
@@ -763,11 +778,16 @@ function finishDailyChallenge(){
     localStorage.setItem(DAILY_KEY,JSON.stringify(dailyState));
   }
   const badge=$('go-daily-badge');
-  if(badge){
-    badge.hidden=false;
-    const goal=getDailyGoal(seed);
-    badge.textContent=(reached?'\u2713 DAILY COMPLETE  ':'')+'Goal: '+goal.label+' '+dailyGoalValue+(goal.unit?' '+goal.unit:'')+'  Progress: '+dailyProgress+(reached&&dailyState.done?' \u00b7 Best: '+dailyState.score:'');
+  if(!badge)return;
+  const goal=getDailyGoal(seed);
+  const unit=goal.unit?' '+goal.unit:'';
+  if(reached){
+    badge.textContent=goal.label+' '+dailyGoalValue+unit+' — Goal reached  ·  Best: '+dailyState.score;
+  }else{
+    badge.textContent=goal.label+': '+dailyProgress+' / '+dailyGoalValue+unit;
   }
+  badge.hidden=false;
+  badge.className='badge '+(reached?'badge-blue badge-blue--success':'badge-blue');
 }
 
 function drawDailyHUD(){

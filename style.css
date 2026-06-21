@@ -40,6 +40,8 @@
   touch-action: manipulation;
 }
 
+[hidden] { display: none !important; }
+
 html, body {
   width: 100%;
   height: 100%;
@@ -619,9 +621,13 @@ html, body {
   font-size: 10px;
   letter-spacing: 1px;
   text-align: center;
-  display: block;
   width: 100%;
   line-height: 1.4;
+}
+.badge-blue--success {
+  color: var(--green);
+  background: rgba(48,212,106,0.08);
+  border-color: rgba(48,212,106,0.22);
 }
 
 #lb-entry-wrap {
